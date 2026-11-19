@@ -66,10 +66,9 @@ class PetOverlayService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var windowManager: WindowManager
 
+    // 主窗口（灵动胶囊 / 悬浮小人本体 / 贴边把手）
     private var windowRoot: FrameLayout? = null
     private var cardView: LinearLayout? = null
-    private var topRowView: LinearLayout? = null
-    private var textColView: LinearLayout? = null
     private var actionRow: LinearLayout? = null
     private var layoutParams: WindowManager.LayoutParams? = null
     private var avatarView: ImageView? = null
@@ -77,6 +76,12 @@ class PetOverlayService : Service() {
     private var speechTextView: TextView? = null
     private var pillDotsView: TextView? = null
     private var voiceBtnView: TextView? = null
+
+    // 独立悬浮气泡窗口（专供悬浮小人/贴边模式使用，绝对不挤动小人本体坐标！）
+    private var bubbleRoot: FrameLayout? = null
+    private var bubbleTextView: TextView? = null
+    private var bubbleParams: WindowManager.LayoutParams? = null
+    private var isBubbleShowing = false
 
     private var morphAnimator: ValueAnimator? = null
     private var captureHelper: ScreenCaptureHelper? = null
@@ -92,6 +97,7 @@ class PetOverlayService : Service() {
     private var currentMood = "idle"
     private var lastSpeechText = "双击音量+语音+看屏对话，双击音量-截屏吐槽~"
 
+    // 悬浮小人固定锚点坐标（只随用户拖拽改变，绝不被对话框修改）
     private var floatingAnchorX = -1
     private var floatingAnchorY = -1
 
@@ -102,7 +108,10 @@ class PetOverlayService : Service() {
     private val collapseRunnable = Runnable {
         if (!isRecording && !isSpeaking) {
             isCapsuleExpanded = false
-            applyModeVisuals(expandedText = null, animate = true)
+            hideFloatingBubble(animate = true)
+            if (PetConfig.getOverlayMode(this) == OverlayMode.CAPSULE) {
+                applyModeVisuals(expandedText = null, animate = true)
+            }
         }
     }
 
@@ -166,7 +175,12 @@ class PetOverlayService : Service() {
         ensureOverlayAttached()
 
         when (action) {
-            ACTION_REFRESH_UI -> applyModeVisuals(expandedText = if (isCapsuleExpanded) lastSpeechText else null, animate = false)
+            ACTION_REFRESH_UI -> {
+                if (PetConfig.getOverlayMode(this) == OverlayMode.CAPSULE) {
+                    hideFloatingBubble(animate = false)
+                }
+                applyModeVisuals(expandedText = if (isCapsuleExpanded) lastSpeechText else null, animate = false)
+            }
             ACTION_TRIGGER_CAPTURE -> triggerScreenReaction()
             ACTION_TOGGLE_VOICE -> toggleVoiceChat()
             ACTION_FEED -> {
@@ -190,24 +204,26 @@ class PetOverlayService : Service() {
     }
 
     /**
-     * Q 弹果冻回弹动效（点击胶囊或纯语音窥屏轻跳时使用）
+     * 明显且不被裁切的 Q 弹果冻回弹动效
      */
     private fun playElasticBounce() {
         val card = cardView ?: return
         card.animate().cancel()
-        card.scaleX = 0.90f
-        card.scaleY = 1.08f
+        card.pivotX = card.width / 2f
+        card.pivotY = card.height / 2f
+        card.scaleX = 0.86f
+        card.scaleY = 1.14f
         card.animate()
-            .scaleX(1.06f)
-            .scaleY(0.95f)
-            .setDuration(130L)
+            .scaleX(1.10f)
+            .scaleY(0.90f)
+            .setDuration(120L)
             .setInterpolator(DecelerateInterpolator())
             .withEndAction {
                 card.animate()
                     .scaleX(1.0f)
                     .scaleY(1.0f)
-                    .setDuration(200L)
-                    .setInterpolator(OvershootInterpolator(2.2f))
+                    .setDuration(240L)
+                    .setInterpolator(OvershootInterpolator(2.8f))
                     .start()
             }
             .start()
@@ -232,9 +248,11 @@ class PetOverlayService : Service() {
     private fun ensureOverlayAttached() {
         if (windowRoot != null) return
 
+        // 外层透明留白，保证 Q 弹放大时绝对不会被窗口边界裁切
         val outer = FrameLayout(this).apply {
             clipChildren = false
             clipToPadding = false
+            setPadding(dp(12), dp(8), dp(12), dp(8))
         }
 
         val card = LinearLayout(this).apply {
@@ -335,7 +353,7 @@ class PetOverlayService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
             x = 0
-            y = dp(PetConfig.getCapsuleTopOffsetDp(this@PetOverlayService))
+            y = (dp(PetConfig.getCapsuleTopOffsetDp(this@PetOverlayService)) - dp(8)).coerceAtLeast(0)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
@@ -355,8 +373,12 @@ class PetOverlayService : Service() {
                 OverlayMode.HIDDEN -> OverlayMode.CAPSULE
             }
             PetConfig.setOverlayMode(this, next)
-            isCapsuleExpanded = true
-            applyModeVisuals(expandedText = "已切换形态：${next.label}", animate = true)
+            hideFloatingBubble(animate = false)
+            isCapsuleExpanded = (next == OverlayMode.CAPSULE)
+            applyModeVisuals(expandedText = if (next == OverlayMode.CAPSULE) "已切换形态：${next.label}" else null, animate = true)
+            if (next != OverlayMode.CAPSULE) {
+                showFloatingBubble("已切换形态：${next.label}")
+            }
             scheduleCollapseAfterDelay(2400L)
         }
 
@@ -369,6 +391,9 @@ class PetOverlayService : Service() {
                     startY = lp.y
                     moved = false
                     longPressTriggered = false
+                    // 按下瞬间给一个 Q 弹压扁反馈！
+                    card.animate().cancel()
+                    card.animate().scaleX(0.91f).scaleY(1.07f).setDuration(90L).start()
                     mainHandler.postDelayed(longPressRunnable, 650L)
                     true
                 }
@@ -384,12 +409,24 @@ class PetOverlayService : Service() {
                             floatingAnchorX = lp.x
                             floatingAnchorY = lp.y
                             try { windowManager.updateViewLayout(outer, lp) } catch (_: Exception) {}
+                            if (isBubbleShowing) {
+                                repositionFloatingBubble()
+                            }
                         }
                     }
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     mainHandler.removeCallbacks(longPressRunnable)
+                    // 松手立刻 Q 弹回弹
+                    card.animate().cancel()
+                    card.animate()
+                        .scaleX(1.0f)
+                        .scaleY(1.0f)
+                        .setDuration(240L)
+                        .setInterpolator(OvershootInterpolator(2.8f))
+                        .start()
+
                     if (!moved && !longPressTriggered && event.action == MotionEvent.ACTION_UP) {
                         val mode = PetConfig.getOverlayMode(this)
                         if (mode == OverlayMode.CAPSULE) {
@@ -397,7 +434,12 @@ class PetOverlayService : Service() {
                             isCapsuleExpanded = !isCapsuleExpanded
                             mainHandler.removeCallbacks(collapseRunnable)
                             if (isCapsuleExpanded) {
-                                applyModeVisuals(expandedText = lastSpeechText, animate = true)
+                                // 先让 Q 弹动效起手 70ms 再丝滑展开，触感极佳
+                                mainHandler.postDelayed({
+                                    if (isCapsuleExpanded) {
+                                        applyModeVisuals(expandedText = lastSpeechText, animate = true)
+                                    }
+                                }, 70L)
                                 scheduleCollapseAfterDelay(10000L)
                             } else {
                                 applyModeVisuals(expandedText = null, animate = true)
@@ -414,8 +456,6 @@ class PetOverlayService : Service() {
 
         windowRoot = outer
         cardView = card
-        topRowView = rowTop
-        textColView = textCol
         actionRow = rowActions
         avatarView = avatar
         titleView = titleTv
@@ -429,31 +469,148 @@ class PetOverlayService : Service() {
         } catch (_: Exception) {
             windowRoot = null
         }
+
+        // 同时准备独立的悬浮气泡窗口（默认隐藏，专供悬浮小人与贴边模式使用）
+        ensureBubbleWindowAttached()
     }
 
-    private fun setTopRowOrder(bubbleOnLeft: Boolean) {
-        val row = topRowView ?: return
-        val avatar = avatarView ?: return
-        val textCol = textColView ?: return
-        val dots = pillDotsView ?: return
-
-        val wantFirst = if (bubbleOnLeft) textCol else avatar
-        if (row.getChildAt(0) === wantFirst) return
-
-        row.removeAllViews()
-        if (bubbleOnLeft) {
-            row.addView(textCol, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-            row.addView(avatar)
-            row.addView(dots)
-        } else {
-            row.addView(avatar)
-            row.addView(textCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            row.addView(dots)
+    private fun ensureBubbleWindowAttached() {
+        if (bubbleRoot != null) return
+        val bRoot = FrameLayout(this).apply {
+            visibility = View.GONE
+            clipChildren = false
+            clipToPadding = false
+        }
+        val bTv = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            maxLines = 5
+            maxWidth = dp(215)
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+        }
+        bRoot.addView(bTv, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ))
+        val blp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = dp(16)
+            y = dp(120)
+        }
+        try {
+            windowManager.addView(bRoot, blp)
+            bubbleRoot = bRoot
+            bubbleTextView = bTv
+            bubbleParams = blp
+        } catch (_: Exception) {
+            bubbleRoot = null
         }
     }
 
     /**
-     * 丝滑灵动胶囊连续形变动画：宽度、圆角、背景色、猫娘头像尺寸全部同步插值，彻底消除“瞬移”感
+     * 在悬浮小人/贴边模式弹出独立气泡窗口：
+     * 严格测量气泡实际宽高，小人在右半屏则气泡必在左侧，小人在左半屏则气泡必在右侧，小人本体 0 像素移动！
+     */
+    private fun showFloatingBubble(msg: String) {
+        val bRoot = bubbleRoot ?: return
+        val bTv = bubbleTextView ?: return
+        val bgAlpha = (PetConfig.getBubbleAlpha(this) * 255).toInt().coerceIn(110, 245)
+        bTv.text = msg
+        bTv.background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(16).toFloat()
+            setColor(Color.argb(bgAlpha, 20, 22, 32))
+            setStroke(dp(1), Color.argb(150, 129, 140, 248))
+        }
+        val wasHidden = !isBubbleShowing
+        isBubbleShowing = true
+        bRoot.visibility = View.VISIBLE
+        repositionFloatingBubble()
+        if (wasHidden) {
+            bRoot.animate().cancel()
+            bRoot.alpha = 0f
+            bRoot.scaleX = 0.86f
+            bRoot.scaleY = 0.86f
+            bRoot.animate()
+                .alpha(1f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .setDuration(200L)
+                .setInterpolator(OvershootInterpolator(1.2f))
+                .start()
+        }
+    }
+
+    private fun repositionFloatingBubble() {
+        val bRoot = bubbleRoot ?: return
+        val bTv = bubbleTextView ?: return
+        val blp = bubbleParams ?: return
+        val dm = resources.displayMetrics
+        val mode = PetConfig.getOverlayMode(this)
+
+        val maxWSpec = View.MeasureSpec.makeMeasureSpec(dp(220), View.MeasureSpec.AT_MOST)
+        val freeSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        bTv.measure(maxWSpec, freeSpec)
+        val bw = bTv.measuredWidth.coerceAtLeast(dp(60))
+        val bh = bTv.measuredHeight.coerceAtLeast(dp(36))
+
+        if (mode == OverlayMode.HIDDEN) {
+            blp.x = (dm.widthPixels - bw - dp(44)).coerceAtLeast(dp(8))
+            blp.y = ((dm.heightPixels - bh) / 2).coerceIn(dp(40), dm.heightPixels - bh - dp(24))
+        } else {
+            val petPx = dp(PetConfig.getPetSizeDp(this))
+            val padH = dp(12)
+            val padV = dp(8)
+            val petLeft = floatingAnchorX + padH
+            val petTop = floatingAnchorY + padV
+            val petCenterX = petLeft + petPx / 2
+            val onRightHalf = petCenterX > (dm.widthPixels / 2)
+
+            blp.x = if (onRightHalf) {
+                (petLeft - bw - dp(8)).coerceAtLeast(dp(8))
+            } else {
+                (petLeft + petPx + dp(8)).coerceAtMost((dm.widthPixels - bw - dp(8)).coerceAtLeast(dp(8)))
+            }
+            blp.y = (petTop + (petPx - bh) / 2).coerceIn(dp(40), (dm.heightPixels - bh - dp(24)).coerceAtLeast(dp(40)))
+        }
+        try {
+            windowManager.updateViewLayout(bRoot, blp)
+        } catch (_: Exception) {}
+    }
+
+    private fun hideFloatingBubble(animate: Boolean) {
+        val bRoot = bubbleRoot ?: return
+        if (!isBubbleShowing) {
+            bRoot.visibility = View.GONE
+            return
+        }
+        isBubbleShowing = false
+        if (!animate) {
+            bRoot.animate().cancel()
+            bRoot.visibility = View.GONE
+            return
+        }
+        bRoot.animate().cancel()
+        bRoot.animate()
+            .alpha(0f)
+            .scaleX(0.90f)
+            .scaleY(0.90f)
+            .setDuration(160L)
+            .withEndAction {
+                if (!isBubbleShowing) bRoot.visibility = View.GONE
+            }
+            .start()
+    }
+
+    /**
+     * 丝滑灵动胶囊连续形变动画
      */
     private fun animateCapsuleMorph(expand: Boolean, expandedText: String?) {
         val outer = windowRoot ?: return
@@ -473,7 +630,7 @@ class PetOverlayService : Service() {
         val bgAlpha = (PetConfig.getBubbleAlpha(this) * 255).toInt().coerceIn(220, 248)
 
         val collapsedW = dp(PetConfig.getCapsuleWidthDp(this))
-        val expandedW = (dm.widthPixels - dp(24)).coerceAtMost(dp(360))
+        val expandedW = (dm.widthPixels - dp(28)).coerceAtMost(dp(356))
         val collapsedAvatar = dp(24)
         val expandedAvatar = dp(48)
         val collapsedRadius = dp(18).toFloat()
@@ -481,11 +638,11 @@ class PetOverlayService : Service() {
         val collapsedColor = Color.BLACK
         val expandedColor = Color.argb(bgAlpha, 16, 17, 22)
 
-        // 窗口外框始终固定在顶部居中且给足宽度，内部 cardView 丝滑居中伸缩，彻底消灭 WindowManager 瞬移跳动！
+        outer.setPadding(dp(12), dp(8), dp(12), dp(8))
         lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
         lp.x = 0
-        lp.y = dp(PetConfig.getCapsuleTopOffsetDp(this))
-        lp.width = if (expand) expandedW else (card.width.coerceAtLeast(collapsedW))
+        lp.y = (dp(PetConfig.getCapsuleTopOffsetDp(this)) - dp(8)).coerceAtLeast(0)
+        lp.width = (if (expand) expandedW else card.width.coerceAtLeast(collapsedW)) + dp(24)
         lp.height = WindowManager.LayoutParams.WRAP_CONTENT
         try { windowManager.updateViewLayout(outer, lp) } catch (_: Exception) {}
 
@@ -578,8 +735,8 @@ class PetOverlayService : Service() {
                         clp.width = collapsedW
                         clp.height = dp(32)
                         card.layoutParams = clp
-                        lp.width = collapsedW
-                        lp.height = dp(32)
+                        lp.width = collapsedW + dp(24)
+                        lp.height = dp(32) + dp(16)
                         try { windowManager.updateViewLayout(outer, lp) } catch (_: Exception) {}
                     }
                 }
@@ -610,7 +767,7 @@ class PetOverlayService : Service() {
         voiceBtnView?.text = if (isRecording) "📤 说完了" else "🎙️ 语音"
 
         if (mode == OverlayMode.CAPSULE && animate) {
-            setTopRowOrder(bubbleOnLeft = false)
+            hideFloatingBubble(animate = false)
             animateCapsuleMorph(expand = isExpanded, expandedText = expandedText)
             return
         }
@@ -620,14 +777,15 @@ class PetOverlayService : Service() {
 
         when (mode) {
             OverlayMode.CAPSULE -> {
-                setTopRowOrder(bubbleOnLeft = false)
+                hideFloatingBubble(animate = false)
                 val collapsedW = dp(PetConfig.getCapsuleWidthDp(this))
-                val expandedW = (dm.widthPixels - dp(24)).coerceAtMost(dp(360))
+                val expandedW = (dm.widthPixels - dp(28)).coerceAtMost(dp(356))
+                outer.setPadding(dp(12), dp(8), dp(12), dp(8))
                 lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
                 lp.x = 0
-                lp.y = dp(PetConfig.getCapsuleTopOffsetDp(this))
+                lp.y = (dp(PetConfig.getCapsuleTopOffsetDp(this)) - dp(8)).coerceAtLeast(0)
                 if (isExpanded) {
-                    lp.width = expandedW
+                    lp.width = expandedW + dp(24)
                     lp.height = WindowManager.LayoutParams.WRAP_CONTENT
                     bg.cornerRadius = dp(26).toFloat()
                     bg.setColor(Color.argb(bgAlpha.coerceAtLeast(228), 16, 17, 22))
@@ -649,8 +807,8 @@ class PetOverlayService : Service() {
                     actions.visibility = View.VISIBLE
                     actions.alpha = 1f
                 } else {
-                    lp.width = collapsedW
-                    lp.height = dp(32)
+                    lp.width = collapsedW + dp(24)
+                    lp.height = dp(32) + dp(16)
                     bg.cornerRadius = dp(18).toFloat()
                     bg.setColor(Color.BLACK)
                     card.background = bg
@@ -673,54 +831,41 @@ class PetOverlayService : Service() {
                 }
             }
             OverlayMode.FLOATING -> {
+                // 悬浮小人本体窗口：只显示猫娘本体，坐标彻底锁定在 floatingAnchorX/Y，气泡由独立窗口展示！
                 val petDp = PetConfig.getPetSizeDp(this)
                 val petPx = dp(petDp)
+                outer.setPadding(dp(12), dp(8), dp(12), dp(8))
                 lp.gravity = Gravity.TOP or Gravity.START
                 lp.width = WindowManager.LayoutParams.WRAP_CONTENT
                 lp.height = WindowManager.LayoutParams.WRAP_CONTENT
                 card.layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT)
 
                 if (floatingAnchorX < 0 || floatingAnchorY < 0) {
-                    floatingAnchorX = dm.widthPixels - petPx - dp(16)
+                    floatingAnchorX = dm.widthPixels - petPx - dp(28)
                     floatingAnchorY = (dm.heightPixels * 0.58f).toInt()
                 }
+                lp.x = floatingAnchorX
+                lp.y = floatingAnchorY
 
-                val onRightHalf = (floatingAnchorX + petPx / 2) > (dm.widthPixels / 2)
-                val bubbleMaxPx = dp(200)
-
-                if (isExpanded) {
-                    setTopRowOrder(bubbleOnLeft = onRightHalf)
-                    lp.x = if (onRightHalf) {
-                        (floatingAnchorX - bubbleMaxPx - dp(12)).coerceAtLeast(dp(8))
-                    } else {
-                        floatingAnchorX.coerceAtMost(dm.widthPixels - petPx - dp(12))
-                    }
-                    lp.y = floatingAnchorY
-                } else {
-                    setTopRowOrder(bubbleOnLeft = false)
-                    lp.x = floatingAnchorX
-                    lp.y = floatingAnchorY
-                }
-
-                bg.cornerRadius = dp(18).toFloat()
-                bg.setColor(if (isExpanded) Color.argb(bgAlpha, 20, 22, 32) else Color.TRANSPARENT)
-                if (isExpanded) bg.setStroke(dp(1), Color.argb(140, 129, 140, 248))
+                bg.setColor(Color.TRANSPARENT)
                 card.background = bg
-                card.setPadding(dp(6), dp(6), dp(8), dp(6))
+                card.setPadding(0, 0, 0, 0)
 
                 avatar.visibility = View.VISIBLE
                 avatar.layoutParams = LinearLayout.LayoutParams(petPx, petPx)
                 dots.visibility = View.GONE
                 title.visibility = View.GONE
-                speech.visibility = if (isExpanded) View.VISIBLE else View.GONE
-                speech.alpha = 1f
-                speech.maxWidth = bubbleMaxPx
-                speech.setTextColor(Color.WHITE)
-                speech.text = expandedText.orEmpty()
+                speech.visibility = View.GONE
                 actions.visibility = View.GONE
+
+                if (isExpanded) {
+                    showFloatingBubble(expandedText.orEmpty())
+                } else {
+                    hideFloatingBubble(animate = animate)
+                }
             }
             OverlayMode.HIDDEN -> {
-                setTopRowOrder(bubbleOnLeft = true)
+                outer.setPadding(dp(4), dp(4), dp(4), dp(4))
                 lp.gravity = Gravity.END or Gravity.CENTER_VERTICAL
                 lp.width = WindowManager.LayoutParams.WRAP_CONTENT
                 lp.height = WindowManager.LayoutParams.WRAP_CONTENT
@@ -728,25 +873,26 @@ class PetOverlayService : Service() {
                 lp.y = 0
                 card.layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT)
                 bg.cornerRadius = dp(14).toFloat()
-                bg.setColor(Color.argb(if (isExpanded) bgAlpha else 120, 20, 22, 32))
+                bg.setColor(Color.argb(120, 20, 22, 32))
                 card.background = bg
                 card.setPadding(dp(6), dp(10), dp(6), dp(10))
 
-                avatar.visibility = if (isExpanded) View.VISIBLE else View.GONE
-                avatar.layoutParams = LinearLayout.LayoutParams(dp(38), dp(38))
-                dots.visibility = if (isExpanded) View.GONE else View.VISIBLE
+                avatar.visibility = View.GONE
+                dots.visibility = View.VISIBLE
                 dots.text = when {
                     isRecording -> "🎙️"
                     isSpeaking -> "🔊"
                     else -> "🐾"
                 }
                 title.visibility = View.GONE
-                speech.visibility = if (isExpanded) View.VISIBLE else View.GONE
-                speech.alpha = 1f
-                speech.maxWidth = dp(220)
-                speech.setTextColor(Color.WHITE)
-                speech.text = expandedText.orEmpty()
+                speech.visibility = View.GONE
                 actions.visibility = View.GONE
+
+                if (isExpanded) {
+                    showFloatingBubble(expandedText.orEmpty())
+                } else {
+                    hideFloatingBubble(animate = animate)
+                }
             }
         }
 
@@ -756,17 +902,29 @@ class PetOverlayService : Service() {
         } catch (_: Exception) {}
     }
 
-    private fun presentReply(text: String, stealth: Boolean) {
-        lastSpeechText = text
+    private fun showStatusOrBubble(msg: String, stealth: Boolean, animateCapsule: Boolean) {
+        val mode = PetConfig.getOverlayMode(this)
         if (stealth) {
             isCapsuleExpanded = false
+            hideFloatingBubble(animate = false)
             applyModeVisuals(expandedText = null, animate = false)
             playElasticBounce()
-        } else {
+            return
+        }
+        if (mode == OverlayMode.CAPSULE) {
             val alreadyExpanded = isCapsuleExpanded
             isCapsuleExpanded = true
-            applyModeVisuals(expandedText = text, animate = !alreadyExpanded)
+            applyModeVisuals(expandedText = msg, animate = animateCapsule && !alreadyExpanded)
+        } else {
+            // 悬浮小人/贴边模式：只更新表情与独立气泡，小人本体 0 位移！
+            avatarView?.setImageResource(PetConfig.spriteResForMood(currentMood))
+            showFloatingBubble(msg)
         }
+    }
+
+    private fun presentReply(text: String, stealth: Boolean) {
+        lastSpeechText = text
+        showStatusOrBubble(text, stealth, animateCapsule = true)
         speakIfEnabled(text)
     }
 
@@ -778,9 +936,8 @@ class PetOverlayService : Service() {
         if (isBusy) return
         val hasMic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         if (!hasMic) {
-            isCapsuleExpanded = true
             lastSpeechText = "⚠️ 请先在猫娘 App 首页点「授权麦克风」再使用语音对话~"
-            applyModeVisuals(expandedText = lastSpeechText, animate = true)
+            showStatusOrBubble(lastSpeechText, stealth = false, animateCapsule = true)
             scheduleCollapseAfterDelay(4000L)
             return
         }
@@ -818,21 +975,13 @@ class PetOverlayService : Service() {
             isRecording = true
             currentMood = "think"
             mainHandler.removeCallbacks(collapseRunnable)
-            if (stealth) {
-                isCapsuleExpanded = false
-                applyModeVisuals(expandedText = null, animate = false)
-                playElasticBounce()
-            } else {
-                isCapsuleExpanded = true
-                applyModeVisuals(expandedText = "🎙️ 正在听你说话（已同步看屏）… 再按一次发送", animate = true)
-            }
+            showStatusOrBubble("🎙️ 正在听你说话（已同步看屏）… 再按一次发送", stealth, animateCapsule = true)
             mainHandler.removeCallbacks(autoStopRecordRunnable)
             mainHandler.postDelayed(autoStopRecordRunnable, 9000L)
         } catch (e: Exception) {
             cleanupRecorder()
             isRecording = false
-            isCapsuleExpanded = true
-            applyModeVisuals(expandedText = "⚠️ 录音启动失败：${e.message}", animate = true)
+            showStatusOrBubble("⚠️ 录音启动失败：${e.message}", stealth = false, animateCapsule = true)
             scheduleCollapseAfterDelay(4000L)
         }
     }
@@ -846,8 +995,7 @@ class PetOverlayService : Service() {
 
         if (file == null || !file.exists() || file.length() < 500L) {
             if (!stealth) {
-                isCapsuleExpanded = true
-                applyModeVisuals(expandedText = "🎙️ 录音太短了，没听清呀~", animate = false)
+                showStatusOrBubble("🎙️ 录音太短了，没听清呀~", stealth = false, animateCapsule = false)
                 scheduleCollapseAfterDelay(2500L)
             } else {
                 applyModeVisuals(expandedText = null, animate = false)
@@ -864,13 +1012,7 @@ class PetOverlayService : Service() {
 
         isBusy = true
         currentMood = "think"
-        if (stealth) {
-            applyModeVisuals(expandedText = null, animate = false)
-            playElasticBounce()
-        } else {
-            isCapsuleExpanded = true
-            applyModeVisuals(expandedText = "✨ 听到了！正在结合屏幕画面思考…", animate = false)
-        }
+        showStatusOrBubble("✨ 听到了！正在结合屏幕画面思考…", stealth, animateCapsule = false)
 
         scope.launch {
             try {
@@ -884,8 +1026,7 @@ class PetOverlayService : Service() {
                 } else {
                     currentMood = "dizzy"
                     lastSpeechText = "⚠️ ${res.error}"
-                    isCapsuleExpanded = !stealth
-                    applyModeVisuals(expandedText = if (stealth) null else lastSpeechText, animate = false)
+                    showStatusOrBubble(lastSpeechText, stealth, animateCapsule = false)
                     scheduleCollapseAfterDelay(4000L)
                 }
             } finally {
@@ -910,14 +1051,7 @@ class PetOverlayService : Service() {
 
         currentMood = "think"
         mainHandler.removeCallbacks(collapseRunnable)
-        if (stealth) {
-            isCapsuleExpanded = false
-            applyModeVisuals(expandedText = null, animate = false)
-            playElasticBounce()
-        } else {
-            isCapsuleExpanded = true
-            applyModeVisuals(expandedText = "喵呜？正在瞄一眼你的屏幕…", animate = true)
-        }
+        showStatusOrBubble("喵呜？正在瞄一眼你的屏幕…", stealth, animateCapsule = true)
 
         scope.launch {
             try {
@@ -934,8 +1068,7 @@ class PetOverlayService : Service() {
                 } else {
                     currentMood = "dizzy"
                     lastSpeechText = "⚠️ ${res.error}"
-                    isCapsuleExpanded = !stealth
-                    applyModeVisuals(expandedText = if (stealth) null else lastSpeechText, animate = false)
+                    showStatusOrBubble(lastSpeechText, stealth, animateCapsule = false)
                     scheduleCollapseAfterDelay(4000L)
                 }
             } finally {
@@ -952,12 +1085,7 @@ class PetOverlayService : Service() {
         val stealth = PetConfig.isStealthAudioOnly(this)
         currentMood = if (delta >= 0) "eat" else "disgust"
         mainHandler.removeCallbacks(collapseRunnable)
-        if (!stealth) {
-            isCapsuleExpanded = true
-            applyModeVisuals(expandedText = "投喂了「$itemName」（好感 ${if (delta >= 0) "+$delta" else "$delta"}）…", animate = true)
-        } else {
-            playElasticBounce()
-        }
+        showStatusOrBubble("投喂了「$itemName」（好感 ${if (delta >= 0) "+$delta" else "$delta"}）…", stealth, animateCapsule = true)
 
         scope.launch {
             try {
@@ -986,7 +1114,6 @@ class PetOverlayService : Service() {
 
     private fun speakIfEnabled(rawText: String) {
         if (!PetConfig.isTtsEnabled(this)) {
-            // 未开启语音：按用户设置的无语音停留时间（默认 3 秒）收回
             scheduleCollapseAfterDelay(PetConfig.getCollapseNoTtsMs(this))
             return
         }
@@ -1001,7 +1128,6 @@ class PetOverlayService : Service() {
                 if (PetConfig.isStealthAudioOnly(this@PetOverlayService)) {
                     applyModeVisuals(expandedText = null, animate = false)
                 } else {
-                    // 语音播报结束后，按用户设置的延迟时间（默认 1 秒）平滑收回
                     scheduleCollapseAfterDelay(PetConfig.getCollapseAfterTtsMs(this@PetOverlayService))
                 }
             }
@@ -1055,7 +1181,11 @@ class PetOverlayService : Service() {
         windowRoot?.let {
             try { windowManager.removeView(it) } catch (_: Exception) {}
         }
+        bubbleRoot?.let {
+            try { windowManager.removeView(it) } catch (_: Exception) {}
+        }
         windowRoot = null
+        bubbleRoot = null
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

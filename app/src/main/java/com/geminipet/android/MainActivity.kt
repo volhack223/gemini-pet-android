@@ -134,7 +134,7 @@ class MainActivity : AppCompatActivity() {
         }
         val logo = ImageView(this).apply { setImageResource(R.drawable.pet_idle) }
         val titleTxt = TextView(this).apply {
-            this.text = "🐾 Gemini 猫娘手机桌宠 v1.4\n丝滑灵动胶囊 · 自定义人设 · 多模型预设"
+            this.text = "🐾 Gemini 猫娘手机桌宠 v1.4.1\n丝滑灵动胶囊 · 自定义人设 · 多模型预设"
             textSize = 14.5f
             setTextColor(Color.parseColor("#202A5C"))
             setPadding(dp(12), 0, 0, 0)
