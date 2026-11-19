@@ -38,8 +38,8 @@ class TtsManager(private val context: Context) : TextToSpeech.OnInitListener {
 
     fun cleanText(rawText: String): String {
         return rawText
-            .replace(Regex("\([^)]*\)|（[^）]*）|[♥♡~～★☆💢😠😒🙄🐾✨💛💗💖📸🔊🍗💬▲▼]"), " ")
-            .replace(Regex("\s+"), " ")
+            .replace(Regex("""\([^)]*\)|（[^）]*）|[♥♡~～★☆💢😠😒🙄🐾✨💛💗💖📸🔊🍗💬▲▼🎙️]"""), " ")
+            .replace(Regex("""\s+"""), " ")
             .trim()
     }
 
@@ -52,7 +52,6 @@ class TtsManager(private val context: Context) : TextToSpeech.OnInitListener {
             TtsEngine.GEMINI -> {
                 val err = speakWithGemini(spoken)
                 if (err != null) {
-                    // 失败时自动回退系统原生 TTS
                     speakWithSystem(spoken)
                     err
                 } else null
@@ -232,7 +231,7 @@ class TtsManager(private val context: Context) : TextToSpeech.OnInitListener {
         out.write("WAVE".toByteArray())
         out.write("fmt ".toByteArray())
         writeIntLE(16)
-        writeShortLE(1) // PCM
+        writeShortLE(1)
         writeShortLE(channels)
         writeIntLE(sampleRate)
         writeIntLE(byteRate)

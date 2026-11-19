@@ -24,8 +24,8 @@ object LlmClient {
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(35, TimeUnit.SECONDS)
+        .writeTimeout(25, TimeUnit.SECONDS)
         .build()
 
     private fun isLocalUrl(url: String): Boolean {
@@ -87,20 +87,116 @@ object LlmClient {
             res = callWithRotation(ctx, fallbackMessages, maxTokens = 512, temperature = 0.98)
         }
 
-        if (!res.ok) return@withContext res
+        parseMoodReply(ctx, res)
+    }
 
-        val cleaned = res.text.replace(Regex("<think>[\\s\\S]*?</think>", RegexOption.IGNORE_CASE), "").trim()
-        val m = Regex("^\\[([a-z]+)\\]\\s*(.+)$", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)).find(cleaned)
+    /**
+     * 原生语音对话：直接把麦克风录制的 M4A 音频发给 Gemini 多模态接口，一步完成听写+回复，不依赖手机自带 Google 语音服务
+     */
+    suspend fun generateVoiceChat(
+        ctx: Context,
+        audioBase64: String,
+        mimeType: String = "audio/mp4"
+    ): PetReplyResult = withContext(Dispatchers.IO) {
+        val keys = PetConfig.getApiKeyList(ctx)
+        if (keys.isEmpty()) return@withContext PetReplyResult(ok = false, error = "语音对话需要配置 Gemini API Key")
+        val model = PetConfig.getModel(ctx).ifBlank { "gemini-3.5-flash-lite" }
+        val sys = buildString {
+            appendLine(PetConfig.buildPersonaPrompt(ctx))
+            appendLine()
+            appendLine("【语音对话要求】")
+            appendLine("- 请认真听懂用户发来的这段语音，直接用当前人设自然回复对方（15~45 字以内，适合语音播报）。")
+            appendLine("- 句首必须带一个最贴合情绪的表情标签：[idle]、[eat]、[xd]、[grin]、[angry]、[smug]、[shy]、[love]、[sleep]、[cry]、[shock]、[disgust]、[think]、[dizzy]。")
+            appendLine("- 不要复述“你刚才说的是…”，直接像面对面聊天一样回应。")
+        }
+
+        val start = PetConfig.nextKeyCursor(ctx, keys.size)
+        var lastErr = "语音请求失败"
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent"
+
+        val bodyJson = JSONObject().apply {
+            put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", sys))))
+            put("contents", JSONArray().put(
+                JSONObject().put("role", "user").put("parts", JSONArray().apply {
+                    put(JSONObject().put("text", "请听下面这段用户的语音并立刻回应："))
+                    put(JSONObject().put("inlineData", JSONObject().apply {
+                        put("mimeType", mimeType)
+                        put("data", audioBase64)
+                    }))
+                })
+            ))
+            put("generationConfig", JSONObject().apply {
+                put("temperature", 0.92)
+                put("maxOutputTokens", 256)
+            })
+        }
+
+        for (attempt in keys.indices) {
+            val idx = (start + attempt) % keys.size
+            val key = keys[idx]
+            val t0 = System.currentTimeMillis()
+            val req = Request.Builder()
+                .url(url)
+                .header("Content-Type", "application/json")
+                .header("x-goog-api-key", key)
+                .post(bodyJson.toString().toRequestBody(JSON_MEDIA))
+                .build()
+            try {
+                httpClient.newCall(req).execute().use { resp ->
+                    val latency = System.currentTimeMillis() - t0
+                    val raw = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) {
+                        val msg = try {
+                            JSONObject(raw).optJSONObject("error")?.optString("message").orEmpty()
+                        } catch (_: Exception) { "" }
+                        lastErr = "语音 HTTP ${resp.code}" + if (msg.isNotEmpty()) ": ${msg.take(70)}" else ""
+                        if (resp.code in listOf(401, 403, 429, 500, 502, 503) && attempt < keys.size - 1) {
+                            return@use
+                        }
+                        return@withContext PetReplyResult(ok = false, error = lastErr, latencyMs = latency)
+                    }
+                    val parts = JSONObject(raw)
+                        .optJSONArray("candidates")
+                        ?.optJSONObject(0)
+                        ?.optJSONObject("content")
+                        ?.optJSONArray("parts")
+                    val sb = StringBuilder()
+                    if (parts != null) {
+                        for (i in 0 until parts.length()) {
+                            val t = parts.optJSONObject(i)?.optString("text").orEmpty()
+                            if (t.isNotEmpty()) sb.append(t)
+                        }
+                    }
+                    val content = sb.toString().trim()
+                    if (content.isEmpty()) {
+                        return@withContext PetReplyResult(ok = false, error = "没听清刚才说了什么~", latencyMs = latency)
+                    }
+                    return@withContext parseMoodReply(ctx, PetReplyResult(ok = true, text = content, latencyMs = latency))
+                }
+            } catch (e: Exception) {
+                lastErr = e.message ?: "语音网络异常"
+                if (attempt == keys.size - 1) {
+                    return@withContext PetReplyResult(ok = false, error = lastErr)
+                }
+            }
+        }
+        PetReplyResult(ok = false, error = lastErr)
+    }
+
+    private fun parseMoodReply(ctx: Context, res: PetReplyResult): PetReplyResult {
+        if (!res.ok) return res
+        val cleaned = res.text.replace(Regex("""<think>[\s\S]*?</think>""", RegexOption.IGNORE_CASE), "").trim()
+        val m = Regex("""^\[([a-z]+)\]\s*(.+)$""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)).find(cleaned)
         val mood = if (m != null && PetConfig.SPRITE_RES_MAP.containsKey(m.groupValues[1].lowercase())) {
             m.groupValues[1].lowercase()
         } else {
             "xd"
         }
-        val finalText = if (m != null) m.groupValues[2].trim() else cleaned.replace(Regex("^\\[.*?\\]\\s*"), "").trim()
+        val finalText = if (m != null) m.groupValues[2].trim() else cleaned.replace(Regex("""^\[.*?\]\s*"""), "").trim()
         if (finalText.isNotEmpty()) {
             PetConfig.addRecentReply(ctx, finalText)
         }
-        res.copy(mood = mood, text = finalText.ifEmpty { "喵呜~" })
+        return res.copy(mood = mood, text = finalText.ifEmpty { "喵呜~" })
     }
 
     suspend fun chat(ctx: Context, userMessage: String): PetReplyResult = withContext(Dispatchers.IO) {
@@ -111,7 +207,7 @@ object LlmClient {
         }
         val res = callWithRotation(ctx, messages, maxTokens = 1024, temperature = 0.82)
         if (!res.ok) return@withContext res
-        val cleaned = res.text.replace(Regex("<think>[\\s\\S]*?</think>", RegexOption.IGNORE_CASE), "").trim()
+        val cleaned = res.text.replace(Regex("""<think>[\s\S]*?</think>""", RegexOption.IGNORE_CASE), "").trim()
         res.copy(text = cleaned.ifEmpty { res.text })
     }
 
@@ -143,7 +239,7 @@ object LlmClient {
                 put("max_tokens", maxTokens)
                 put("temperature", temperature)
                 put("top_p", 0.95)
-                if (isGoogle && Regex("gemini-2\\.5", RegexOption.IGNORE_CASE).containsMatchIn(model)) {
+                if (isGoogle && Regex("""gemini-2\.5""", RegexOption.IGNORE_CASE).containsMatchIn(model)) {
                     put("reasoning_effort", "none")
                 }
             }

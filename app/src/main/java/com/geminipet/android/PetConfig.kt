@@ -25,14 +25,15 @@ enum class TtsEngine(val code: String, val label: String) {
     }
 }
 
-enum class HotkeyMode(val code: String, val label: String) {
-    BOTH_VOL("both_vol", "同时按 音量+ & 音量-"),
+enum class HotkeyBinding(val code: String, val label: String) {
+    DOUBLE_VOL_UP("double_vol_up", "双击 音量+"),
     DOUBLE_VOL_DOWN("double_vol_down", "双击 音量-"),
+    BOTH_VOL("both_vol", "同时按 音量+ & 音量-"),
     OFF("off", "关闭");
 
     companion object {
-        fun fromCode(code: String?): HotkeyMode =
-            entries.firstOrNull { it.code == code } ?: BOTH_VOL
+        fun fromCode(code: String?, defaultVal: HotkeyBinding): HotkeyBinding =
+            entries.firstOrNull { it.code == code } ?: defaultVal
     }
 }
 
@@ -126,7 +127,7 @@ object PetConfig {
     fun setApiKeysRaw(ctx: Context, keys: String) = prefs(ctx).edit().putString("api_keys", keys.trim()).apply()
 
     fun getApiKeyList(ctx: Context): List<String> =
-        getApiKeysRaw(ctx).split(Regex("[\r\n,，;；]+")).map { it.trim() }.filter { it.isNotEmpty() }
+        getApiKeysRaw(ctx).split(Regex("[\\r\\n,，;；]+")).map { it.trim() }.filter { it.isNotEmpty() }
 
     fun getModel(ctx: Context): String = prefs(ctx).getString("model", "gemini-3.5-flash-lite")!!
     fun setModel(ctx: Context, model: String) = prefs(ctx).edit().putString("model", model.trim()).apply()
@@ -138,13 +139,22 @@ object PetConfig {
     fun getPetSizeDp(ctx: Context): Int = prefs(ctx).getInt("pet_size_dp", 82).coerceIn(48, 160)
     fun setPetSizeDp(ctx: Context, sizeDp: Int) = prefs(ctx).edit().putInt("pet_size_dp", sizeDp.coerceIn(48, 160)).apply()
 
-    // 顶部灵动胶囊 Y 偏移 (0dp ~ 40dp，用于精准对齐摄像头挖孔)
+    // 顶部灵动胶囊 Y 偏移 (0dp ~ 40dp)
     fun getCapsuleTopOffsetDp(ctx: Context): Int = prefs(ctx).getInt("capsule_top_dp", 8).coerceIn(0, 40)
     fun setCapsuleTopOffsetDp(ctx: Context, offsetDp: Int) = prefs(ctx).edit().putInt("capsule_top_dp", offsetDp.coerceIn(0, 40)).apply()
 
-    // 全局硬件快捷键模式
-    fun getHotkeyMode(ctx: Context): HotkeyMode = HotkeyMode.fromCode(prefs(ctx).getString("hotkey_mode", "both_vol"))
-    fun setHotkeyMode(ctx: Context, mode: HotkeyMode) = prefs(ctx).edit().putString("hotkey_mode", mode.code).apply()
+    // 双自定义快捷键：截屏吐槽（默认双击音量-） & 语音对话（默认双击音量+）
+    fun getCaptureHotkey(ctx: Context): HotkeyBinding =
+        HotkeyBinding.fromCode(prefs(ctx).getString("hotkey_capture", "double_vol_down"), HotkeyBinding.DOUBLE_VOL_DOWN)
+
+    fun setCaptureHotkey(ctx: Context, binding: HotkeyBinding) =
+        prefs(ctx).edit().putString("hotkey_capture", binding.code).apply()
+
+    fun getVoiceHotkey(ctx: Context): HotkeyBinding =
+        HotkeyBinding.fromCode(prefs(ctx).getString("hotkey_voice", "double_vol_up"), HotkeyBinding.DOUBLE_VOL_UP)
+
+    fun setVoiceHotkey(ctx: Context, binding: HotkeyBinding) =
+        prefs(ctx).edit().putString("hotkey_voice", binding.code).apply()
 
     // TTS 语音配置
     fun isTtsEnabled(ctx: Context): Boolean = prefs(ctx).getBoolean("tts_enabled", true)
@@ -256,8 +266,8 @@ object PetConfig {
         val recent = getRecentReplies(ctx)
 
         return buildString {
-            appendLine("【核心原则：手机屏幕内容为先，性格与好感度作为语气衬托】")
-            appendLine("你是常驻在用户安卓手机顶部的 Q 版二次元猫娘 AI 桌宠。如果附带了当前手机屏幕截图，必须优先紧扣画面中用户正在刷的 App、视频、图文或聊天内容来吐槽或互动。")
+            appendLine("【核心原则：内容为先，性格与好感度作为语气衬托】")
+            appendLine("你是常驻在用户安卓手机上的 Q 版二次元猫娘 AI 桌宠。优先紧扣用户的语音问题或屏幕画面内容来自然互动。")
             appendLine("【当前语气底色：${trait.name} × ${behavior.name} · 好感度 $aff/100（${stage.label}）】")
             appendLine("1. 性格口吻【${trait.name}】：${trait.desc}")
             if (trait.catchphrases.isNotEmpty()) appendLine("2. 标志性口癖词库：${trait.catchphrases}")

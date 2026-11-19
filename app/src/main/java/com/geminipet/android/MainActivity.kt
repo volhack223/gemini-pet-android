@@ -1,8 +1,10 @@
 package com.geminipet.android
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
@@ -25,6 +27,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -47,9 +50,9 @@ class MainActivity : AppCompatActivity() {
                 putExtra(PetOverlayService.EXTRA_RESULT_DATA, result.data)
             }
             startForegroundService(svc)
-            Toast.makeText(this, "截屏识图已就绪！点顶部黑条或按音量组合键即可吐槽~", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "截屏与悬浮已就绪！点顶部黑条或按音量快捷键即可互动~", Toast.LENGTH_SHORT).show()
         } else {
-            Toast.makeText(this, "未授予截屏权限，仍可使用纯文字与语音互动", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "未授予截屏权限，仍可使用语音和文字互动", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -82,8 +85,8 @@ class MainActivity : AppCompatActivity() {
         }
         scroll.addView(root)
 
-        fun sectionTitle(text: String) = TextView(this).apply {
-            this.text = text
+        fun sectionTitle(label: String) = TextView(this).apply {
+            this.text = label
             textSize = 15f
             setTextColor(Color.parseColor("#202A5C"))
             setPadding(0, dp(16), 0, dp(6))
@@ -96,9 +99,8 @@ class MainActivity : AppCompatActivity() {
         }
         val logo = ImageView(this).apply { setImageResource(R.drawable.pet_idle) }
         val titleTxt = TextView(this).apply {
-            text = "🐾 Gemini 猫娘手机桌宠 v1.1
-状态栏灵动胶囊 · AI 语音 · 音量组合键"
-            textSize = 15f
+            this.text = "🐾 Gemini 猫娘手机桌宠 v1.2\n灵动胶囊 · 语音对话 · 截屏吐槽 · AI 语音"
+            textSize = 14.5f
             setTextColor(Color.parseColor("#202A5C"))
             setPadding(dp(12), 0, 0, 0)
         }
@@ -107,10 +109,11 @@ class MainActivity : AppCompatActivity() {
         root.addView(header)
 
         // 1. 权限与启动控制
-        root.addView(sectionTitle("1. 启动悬浮窗与截屏识图"))
+        root.addView(sectionTitle("1. 授权与启动"))
         val btnRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         btnRow1.addView(Button(this).apply {
-            text = "授权悬浮窗"
+            this.text = "授权悬浮窗"
+            textSize = 12f
             setOnClickListener {
                 if (!Settings.canDrawOverlays(this@MainActivity)) {
                     startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
@@ -120,26 +123,44 @@ class MainActivity : AppCompatActivity() {
             }
         })
         btnRow1.addView(Button(this).apply {
-            text = "🚀 启动并授权截屏"
+            this.text = "🎙️ 授权麦克风"
+            textSize = 12f
+            setOnClickListener {
+                if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 101)
+                } else {
+                    Toast.makeText(this@MainActivity, "已获得麦克风权限 ✅", Toast.LENGTH_SHORT).show()
+                }
+            }
+        })
+        val btnRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        btnRow2.addView(Button(this).apply {
+            this.text = "🚀 启动并授权截屏"
             setOnClickListener {
                 if (!Settings.canDrawOverlays(this@MainActivity)) {
-                    Toast.makeText(this@MainActivity, "请先点左边「授权悬浮窗」", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "请先点上方「授权悬浮窗」", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
-                if (Build.VERSION.SDK_INT >= 33) {
-                    requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 100)
+                val perms = mutableListOf<String>()
+                if (Build.VERSION.SDK_INT >= 33) perms.add("android.permission.POST_NOTIFICATIONS")
+                if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    perms.add(Manifest.permission.RECORD_AUDIO)
+                }
+                if (perms.isNotEmpty()) {
+                    requestPermissions(perms.toTypedArray(), 100)
                 }
                 val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 screenCaptureLauncher.launch(mpm.createScreenCaptureIntent())
             }
         })
-        btnRow1.addView(Button(this).apply {
-            text = "关闭"
+        btnRow2.addView(Button(this).apply {
+            this.text = "关闭悬浮"
             setOnClickListener {
                 startService(Intent(this@MainActivity, PetOverlayService::class.java).setAction(PetOverlayService.ACTION_STOP))
             }
         })
         root.addView(btnRow1)
+        root.addView(btnRow2)
 
         // 2. 显示形态、小人大小、灵动胶囊位置调节
         root.addView(sectionTitle("2. 显示形态与大小/位置调节"))
@@ -147,7 +168,7 @@ class MainActivity : AppCompatActivity() {
         val curMode = PetConfig.getOverlayMode(this)
         OverlayMode.entries.forEach { mode ->
             modeGroup.addView(RadioButton(this).apply {
-                text = mode.label
+                this.text = mode.label
                 textSize = 12.5f
                 isChecked = mode == curMode
                 setOnClickListener {
@@ -158,9 +179,9 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(modeGroup)
 
-        val sizeLabel = TextView(this).apply { text = "悬浮小人大小：${PetConfig.getPetSizeDp(this@MainActivity)} dp" }
+        val sizeLabel = TextView(this).apply { this.text = "悬浮小人大小：${PetConfig.getPetSizeDp(this@MainActivity)} dp" }
         val sizeSeek = SeekBar(this).apply {
-            max = 112 // 48..160
+            max = 112
             progress = (PetConfig.getPetSizeDp(this@MainActivity) - 48).coerceIn(0, 112)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
@@ -175,7 +196,7 @@ class MainActivity : AppCompatActivity() {
                 override fun onStopTrackingTouch(sb: SeekBar?) {}
             })
         }
-        val offsetLabel = TextView(this).apply { text = "顶部灵动胶囊垂直微调：${PetConfig.getCapsuleTopOffsetDp(this@MainActivity)} dp（对齐挖孔用）" }
+        val offsetLabel = TextView(this).apply { this.text = "顶部灵动胶囊垂直微调：${PetConfig.getCapsuleTopOffsetDp(this@MainActivity)} dp（对齐挖孔用）" }
         val offsetSeek = SeekBar(this).apply {
             max = 40
             progress = PetConfig.getCapsuleTopOffsetDp(this@MainActivity)
@@ -191,7 +212,7 @@ class MainActivity : AppCompatActivity() {
                 override fun onStopTrackingTouch(sb: SeekBar?) {}
             })
         }
-        val alphaLabel = TextView(this).apply { text = "卡片/气泡不透明度：${(PetConfig.getBubbleAlpha(this@MainActivity) * 100).toInt()}%" }
+        val alphaLabel = TextView(this).apply { this.text = "卡片/气泡不透明度：${(PetConfig.getBubbleAlpha(this@MainActivity) * 100).toInt()}%" }
         val alphaSeek = SeekBar(this).apply {
             max = 65
             progress = ((PetConfig.getBubbleAlpha(this@MainActivity) - 0.35f) * 100).toInt().coerceIn(0, 65)
@@ -208,7 +229,7 @@ class MainActivity : AppCompatActivity() {
             })
         }
         val cbVision = CheckBox(this).apply {
-            text = "📸 开启内存级截屏识图（阅后即焚，零存储占用）"
+            this.text = "📸 开启内存级截屏识图（阅后即焚，零存储占用）"
             isChecked = PetConfig.isVisionEnabled(this@MainActivity)
             setOnCheckedChangeListener { _, checked -> PetConfig.setVisionEnabled(this@MainActivity, checked) }
         }
@@ -220,19 +241,45 @@ class MainActivity : AppCompatActivity() {
         root.addView(alphaSeek)
         root.addView(cbVision)
 
-        // 3. 全局硬件快捷组合键
-        root.addView(sectionTitle("3. 硬件快捷键（任意 App 内一键触发对话）"))
-        val hotkeyGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
-        val curHotkey = PetConfig.getHotkeyMode(this)
-        HotkeyMode.entries.forEach { hm ->
-            hotkeyGroup.addView(RadioButton(this).apply {
-                text = hm.label
-                isChecked = hm == curHotkey
-                setOnClickListener { PetConfig.setHotkeyMode(this@MainActivity, hm) }
+        // 3. 全局自定义双快捷键（语音对话 + 截屏吐槽）
+        root.addView(sectionTitle("3. 自定义硬件快捷键（任意 App 内一键触发）"))
+        root.addView(TextView(this).apply {
+            this.text = "🎙️ 语音输入对话快捷键（按一下开录，再按一下发送，默认双击音量+）："
+            textSize = 12.5f
+            setTextColor(Color.parseColor("#0F172A"))
+        })
+        val voiceHotkeyGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
+        val curVoiceHk = PetConfig.getVoiceHotkey(this)
+        HotkeyBinding.entries.forEach { hb ->
+            voiceHotkeyGroup.addView(RadioButton(this).apply {
+                this.text = hb.label
+                textSize = 12.5f
+                isChecked = hb == curVoiceHk
+                setOnClickListener { PetConfig.setVoiceHotkey(this@MainActivity, hb) }
             })
         }
+        root.addView(voiceHotkeyGroup)
+
+        root.addView(TextView(this).apply {
+            this.text = "📸 截屏吐槽对话快捷键（默认双击音量-）："
+            textSize = 12.5f
+            setTextColor(Color.parseColor("#0F172A"))
+            setPadding(0, dp(8), 0, 0)
+        })
+        val captureHotkeyGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
+        val curCapHk = PetConfig.getCaptureHotkey(this)
+        HotkeyBinding.entries.forEach { hb ->
+            captureHotkeyGroup.addView(RadioButton(this).apply {
+                this.text = hb.label
+                textSize = 12.5f
+                isChecked = hb == curCapHk
+                setOnClickListener { PetConfig.setCaptureHotkey(this@MainActivity, hb) }
+            })
+        }
+        root.addView(captureHotkeyGroup)
+
         val btnAcc = Button(this).apply {
-            text = "⌨️ 去开启无障碍按键权限"
+            this.text = "⌨️ 去开启无障碍按键权限"
             setOnClickListener {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             }
@@ -243,14 +290,13 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, dp(4), 0, dp(4))
         }
         hotkeyStatusLabel = tvHotkeyStatus
-        root.addView(hotkeyGroup)
         root.addView(btnAcc)
         root.addView(tvHotkeyStatus)
 
-        // 4. 多引擎语音播报（Gemini AI 语音 / 自定义在线 TTS / 系统原生）
+        // 4. 多引擎语音播报
         root.addView(sectionTitle("4. 语音播报（多引擎 TTS 升级）"))
         val cbTts = CheckBox(this).apply {
-            text = "🔊 开启语音播报"
+            this.text = "🔊 开启语音播报"
             isChecked = PetConfig.isTtsEnabled(this@MainActivity)
             setOnCheckedChangeListener { _, checked -> PetConfig.setTtsEnabled(this@MainActivity, checked) }
         }
@@ -259,7 +305,6 @@ class MainActivity : AppCompatActivity() {
         val ttsEngineGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
         val curEngine = PetConfig.getTtsEngine(this)
 
-        // Gemini TTS 子面板
         val geminiTtsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val etGeminiTtsModel = EditText(this).apply {
             hint = "Gemini TTS 模型（默认 gemini-2.5-flash-preview-tts）"
@@ -269,21 +314,20 @@ class MainActivity : AppCompatActivity() {
         val curVoice = PetConfig.getGeminiTtsVoice(this)
         PetConfig.GEMINI_TTS_VOICES.forEach { (voiceId, label) ->
             geminiVoiceGroup.addView(RadioButton(this).apply {
-                text = label
+                this.text = label
                 textSize = 12.5f
                 isChecked = voiceId == curVoice
                 setOnClickListener { PetConfig.setGeminiTtsVoice(this@MainActivity, voiceId) }
             })
         }
         geminiTtsBox.addView(TextView(this).apply {
-            text = "复用下方 Gemini API Key，零额外配置即可发声："
+            this.text = "复用下方 Gemini API Key，零额外配置即可发声："
             textSize = 12f
             setTextColor(Color.parseColor("#475569"))
         })
         geminiTtsBox.addView(etGeminiTtsModel)
         geminiTtsBox.addView(geminiVoiceGroup)
 
-        // 自定义 OpenAI 兼容 TTS 子面板（硅基流动 CosyVoice2 / Fish Audio / 本地 GPT-SoVITS）
         val customTtsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val etCustomTtsUrl = EditText(this).apply {
             hint = "TTS 接口（如 https://api.siliconflow.cn/v1/audio/speech）"
@@ -306,9 +350,8 @@ class MainActivity : AppCompatActivity() {
         customTtsBox.addView(etCustomTtsModel)
         customTtsBox.addView(etCustomTtsVoice)
 
-        // 系统原生 TTS 子面板
         val sysTtsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val pitchLabel = TextView(this).apply { text = "音调：${"%.2f".format(PetConfig.getTtsPitch(this@MainActivity))}" }
+        val pitchLabel = TextView(this).apply { this.text = "音调：${"%.2f".format(PetConfig.getTtsPitch(this@MainActivity))}" }
         val pitchSeek = SeekBar(this).apply {
             max = 120
             progress = ((PetConfig.getTtsPitch(this@MainActivity) - 0.6f) * 100).toInt().coerceIn(0, 120)
@@ -322,7 +365,7 @@ class MainActivity : AppCompatActivity() {
                 override fun onStopTrackingTouch(sb: SeekBar?) {}
             })
         }
-        val rateLabel = TextView(this).apply { text = "语速：${"%.2f".format(PetConfig.getTtsRate(this@MainActivity))}" }
+        val rateLabel = TextView(this).apply { this.text = "语速：${"%.2f".format(PetConfig.getTtsRate(this@MainActivity))}" }
         val rateSeek = SeekBar(this).apply {
             max = 120
             progress = ((PetConfig.getTtsRate(this@MainActivity) - 0.6f) * 100).toInt().coerceIn(0, 120)
@@ -350,7 +393,7 @@ class MainActivity : AppCompatActivity() {
 
         TtsEngine.entries.forEach { eng ->
             ttsEngineGroup.addView(RadioButton(this).apply {
-                text = eng.label
+                this.text = eng.label
                 textSize = 12f
                 isChecked = eng == curEngine
                 setOnClickListener {
@@ -362,7 +405,7 @@ class MainActivity : AppCompatActivity() {
         val ttsTestStatus = TextView(this).apply { textSize = 12f; setPadding(0, dp(4), 0, dp(4)) }
         val ttsBtnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         ttsBtnRow.addView(Button(this).apply {
-            text = "保存语音设置"
+            this.text = "保存语音设置"
             setOnClickListener {
                 PetConfig.setGeminiTtsModel(this@MainActivity, etGeminiTtsModel.text.toString())
                 PetConfig.setCustomTtsUrl(this@MainActivity, etCustomTtsUrl.text.toString())
@@ -373,7 +416,7 @@ class MainActivity : AppCompatActivity() {
             }
         })
         ttsBtnRow.addView(Button(this).apply {
-            text = "🔊 试听语音"
+            this.text = "🔊 试听语音"
             setOnClickListener {
                 PetConfig.setGeminiTtsModel(this@MainActivity, etGeminiTtsModel.text.toString())
                 PetConfig.setCustomTtsUrl(this@MainActivity, etCustomTtsUrl.text.toString())
@@ -427,7 +470,7 @@ class MainActivity : AppCompatActivity() {
             Triple("🥛酸奶", "主人的酸奶", 999)
         ).forEach { (btnTxt, itemName, rawDelta) ->
             feedRow.addView(Button(this).apply {
-                text = btnTxt
+                this.text = btnTxt
                 textSize = 11f
                 setOnClickListener {
                     val cur = PetConfig.getAffection(this@MainActivity)
@@ -453,7 +496,7 @@ class MainActivity : AppCompatActivity() {
         val traitGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
         PetConfig.TRAITS.forEach { t ->
             traitGroup.addView(RadioButton(this).apply {
-                text = t.name
+                this.text = t.name
                 textSize = 12f
                 isChecked = t.id == PetConfig.getActiveTraitId(this@MainActivity)
                 setOnClickListener { PetConfig.setActiveTraitId(this@MainActivity, t.id) }
@@ -462,14 +505,14 @@ class MainActivity : AppCompatActivity() {
         val behaviorGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
         PetConfig.BEHAVIORS.forEach { b ->
             behaviorGroup.addView(RadioButton(this).apply {
-                text = b.name
+                this.text = b.name
                 textSize = 12f
                 isChecked = b.id == PetConfig.getActiveBehaviorId(this@MainActivity)
                 setOnClickListener { PetConfig.setActiveBehaviorId(this@MainActivity, b.id) }
             })
         }
         val cbRandomMood = CheckBox(this).apply {
-            text = "🎲 开启随机心情（每 30 分钟自动换性格×行为）"
+            this.text = "🎲 开启随机心情（每 30 分钟自动换性格×行为）"
             isChecked = PetConfig.isRandomMood(this@MainActivity)
             setOnCheckedChangeListener { _, checked -> PetConfig.setRandomMood(this@MainActivity, checked) }
         }
@@ -495,7 +538,7 @@ class MainActivity : AppCompatActivity() {
         val testStatus = TextView(this).apply { textSize = 12f; setPadding(0, dp(4), 0, dp(4)) }
         val apiBtnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         apiBtnRow.addView(Button(this).apply {
-            text = "保存配置"
+            this.text = "保存配置"
             setOnClickListener {
                 PetConfig.setApiUrl(this@MainActivity, etUrl.text.toString())
                 PetConfig.setModel(this@MainActivity, etModel.text.toString())
@@ -504,7 +547,7 @@ class MainActivity : AppCompatActivity() {
             }
         })
         apiBtnRow.addView(Button(this).apply {
-            text = "测试连接"
+            this.text = "测试连接"
             setOnClickListener {
                 PetConfig.setApiUrl(this@MainActivity, etUrl.text.toString())
                 PetConfig.setModel(this@MainActivity, etModel.text.toString())
@@ -527,7 +570,7 @@ class MainActivity : AppCompatActivity() {
         val etChat = EditText(this).apply { hint = "直接在这里和猫娘聊天..." }
         val tvChatReply = TextView(this).apply { textSize = 13f; setPadding(0, dp(6), 0, dp(6)) }
         val btnSendChat = Button(this).apply {
-            text = "发送对话"
+            this.text = "发送对话"
             setOnClickListener {
                 val msg = etChat.text.toString().trim()
                 if (msg.isEmpty()) return@setOnClickListener
