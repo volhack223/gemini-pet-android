@@ -96,7 +96,8 @@ object LlmClient {
     suspend fun generateVoiceChat(
         ctx: Context,
         audioBase64: String,
-        mimeType: String = "audio/mp4"
+        mimeType: String = "audio/mp4",
+        screenshotDataUrl: String? = null
     ): PetReplyResult = withContext(Dispatchers.IO) {
         val keys = PetConfig.getApiKeyList(ctx)
         if (keys.isEmpty()) return@withContext PetReplyResult(ok = false, error = "语音对话需要配置 Gemini API Key")
@@ -118,11 +119,24 @@ object LlmClient {
             put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", sys))))
             put("contents", JSONArray().put(
                 JSONObject().put("role", "user").put("parts", JSONArray().apply {
-                    put(JSONObject().put("text", "请听下面这段用户的语音并立刻回应："))
+                    val hasImg = !screenshotDataUrl.isNullOrBlank()
+                    val promptHint = if (hasImg) {
+                        "请结合附带的手机当前屏幕截图，认真听懂用户的语音提问或吐槽并直接回应："
+                    } else {
+                        "请听下面这段用户的语音并立刻回应："
+                    }
+                    put(JSONObject().put("text", promptHint))
                     put(JSONObject().put("inlineData", JSONObject().apply {
                         put("mimeType", mimeType)
                         put("data", audioBase64)
                     }))
+                    if (hasImg) {
+                        val b64Img = screenshotDataUrl!!.substringAfter("base64,", screenshotDataUrl)
+                        put(JSONObject().put("inlineData", JSONObject().apply {
+                            put("mimeType", "image/jpeg")
+                            put("data", b64Img)
+                        }))
+                    }
                 })
             ))
             put("generationConfig", JSONObject().apply {

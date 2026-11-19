@@ -2,16 +2,74 @@ package com.geminipet.android
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
+import android.graphics.Bitmap
+import android.os.Build
+import android.util.Base64
+import android.view.Display
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
+import kotlinx.coroutines.suspendCancellableCoroutine
+import java.io.ByteArrayOutputStream
+import kotlin.coroutines.resume
 
 /**
- * 全局双快捷键监听服务：
- * - 语音对话快捷键（默认：快速双击 音量+）
- * - 截屏吐槽快捷键（默认：快速双击 音量-）
- * 均可在 App 内自由改键或关闭
+ * 全局双快捷键监听 + Android 11+ 永不掉线无障碍内存截屏服务
  */
 class PetHotkeyService : AccessibilityService() {
+
+    companion object {
+        @Volatile
+        var instance: PetHotkeyService? = null
+            private set
+
+        /**
+         * 通过 Android 11+ 无障碍 API 静默内存截屏，永不因 MediaProjection 超时而掉线
+         */
+        suspend fun takeScreenshotDataUrl(quality: Int = 48): String? {
+            val svc = instance ?: return null
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+            return suspendCancellableCoroutine { cont ->
+                try {
+                    svc.takeScreenshot(
+                        Display.DEFAULT_DISPLAY,
+                        svc.mainExecutor,
+                        object : TakeScreenshotCallback {
+                            override fun onSuccess(screenshot: ScreenshotResult) {
+                                var resultUrl: String? = null
+                                try {
+                                    val hw = Bitmap.wrapHardwareBuffer(screenshot.hardwareBuffer, screenshot.colorSpace)
+                                    val soft = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                                    hw?.recycle()
+                                    if (soft != null) {
+                                        val targetW = 720
+                                        val scale = targetW.toFloat() / soft.width.coerceAtLeast(1)
+                                        val targetH = (soft.height * scale).toInt().coerceAtLeast(1)
+                                        val scaled = Bitmap.createScaledBitmap(soft, targetW, targetH, true)
+                                        soft.recycle()
+                                        val baos = ByteArrayOutputStream()
+                                        scaled.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+                                        scaled.recycle()
+                                        resultUrl = "data:image/jpeg;base64," + Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
+                                    }
+                                } catch (_: Exception) {
+                                    resultUrl = null
+                                } finally {
+                                    try { screenshot.hardwareBuffer.close() } catch (_: Exception) {}
+                                }
+                                if (cont.isActive) cont.resume(resultUrl)
+                            }
+
+                            override fun onFailure(errorCode: Int) {
+                                if (cont.isActive) cont.resume(null)
+                            }
+                        }
+                    )
+                } catch (_: Exception) {
+                    if (cont.isActive) cont.resume(null)
+                }
+            }
+        }
+    }
 
     private var volUpDown = false
     private var volDownDown = false
@@ -19,6 +77,16 @@ class PetHotkeyService : AccessibilityService() {
     private var lastVolUpTapAt = 0L
     private var lastVolDownTapAt = 0L
     private var lastTriggerAt = 0L
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        instance = this
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (instance === this) instance = null
+    }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
@@ -35,7 +103,6 @@ class PetHotkeyService : AccessibilityService() {
 
         val now = System.currentTimeMillis()
 
-        // 1. 检测「同时按 音量+ & 音量-」
         if (captureKey == HotkeyBinding.BOTH_VOL || voiceKey == HotkeyBinding.BOTH_VOL) {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 if (code == KeyEvent.KEYCODE_VOLUME_UP) volUpDown = true
@@ -60,7 +127,6 @@ class PetHotkeyService : AccessibilityService() {
             }
         }
 
-        // 2. 检测「快速双击 音量+」
         if (code == KeyEvent.KEYCODE_VOLUME_UP && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
             if (voiceKey == HotkeyBinding.DOUBLE_VOL_UP || captureKey == HotkeyBinding.DOUBLE_VOL_UP) {
                 if (now - lastVolUpTapAt in 40L..420L) {
@@ -78,7 +144,6 @@ class PetHotkeyService : AccessibilityService() {
             }
         }
 
-        // 3. 检测「快速双击 音量-」
         if (code == KeyEvent.KEYCODE_VOLUME_DOWN && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
             if (captureKey == HotkeyBinding.DOUBLE_VOL_DOWN || voiceKey == HotkeyBinding.DOUBLE_VOL_DOWN) {
                 if (now - lastVolDownTapAt in 40L..420L) {

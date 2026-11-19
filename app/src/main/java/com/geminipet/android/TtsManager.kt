@@ -3,7 +3,10 @@ package com.geminipet.android
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -20,6 +23,7 @@ import java.util.concurrent.TimeUnit
 
 class TtsManager(private val context: Context) : TextToSpeech.OnInitListener {
 
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -28,57 +32,79 @@ class TtsManager(private val context: Context) : TextToSpeech.OnInitListener {
     private var sysTts: TextToSpeech? = TextToSpeech(context, this)
     private var sysReady = false
     private var mediaPlayer: MediaPlayer? = null
+    private var pendingSysDone: (() -> Unit)? = null
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             val res = sysTts?.setLanguage(Locale.CHINA)
             sysReady = res != TextToSpeech.LANG_MISSING_DATA && res != TextToSpeech.LANG_NOT_SUPPORTED
+            sysTts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {}
+                override fun onDone(utteranceId: String?) {
+                    val cb = pendingSysDone
+                    pendingSysDone = null
+                    if (cb != null) mainHandler.post { cb() }
+                }
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String?) {
+                    val cb = pendingSysDone
+                    pendingSysDone = null
+                    if (cb != null) mainHandler.post { cb() }
+                }
+            })
         }
     }
 
     fun cleanText(rawText: String): String {
         return rawText
-            .replace(Regex("""\([^)]*\)|（[^）]*）|[♥♡~～★☆💢😠😒🙄🐾✨💛💗💖📸🔊🍗💬▲▼🎙️]"""), " ")
+            .replace(Regex("""\([^)]*\)|（[^）]*）|[♥♡~～★☆💢😠😒🙄🐾✨💛💗💖📸🔊🍗💬▲▼🎙️🎧]"""), " ")
             .replace(Regex("""\s+"""), " ")
             .trim()
     }
 
-    suspend fun speak(rawText: String): String? {
+    suspend fun speak(rawText: String, onFinished: (() -> Unit)? = null): String? {
         val spoken = cleanText(rawText)
-        if (spoken.isEmpty()) return null
+        if (spoken.isEmpty()) {
+            onFinished?.let { mainHandler.post(it) }
+            return null
+        }
 
         val engine = PetConfig.getTtsEngine(context)
         return when (engine) {
             TtsEngine.GEMINI -> {
-                val err = speakWithGemini(spoken)
+                val err = speakWithGemini(spoken, onFinished)
                 if (err != null) {
-                    speakWithSystem(spoken)
+                    speakWithSystem(spoken, onFinished)
                     err
                 } else null
             }
             TtsEngine.OPENAI_COMPAT -> {
-                val err = speakWithOpenAiCompat(spoken)
+                val err = speakWithOpenAiCompat(spoken, onFinished)
                 if (err != null) {
-                    speakWithSystem(spoken)
+                    speakWithSystem(spoken, onFinished)
                     err
                 } else null
             }
             TtsEngine.SYSTEM -> {
-                speakWithSystem(spoken)
+                speakWithSystem(spoken, onFinished)
                 null
             }
         }
     }
 
-    private fun speakWithSystem(spoken: String) {
-        if (!sysReady) return
+    private fun speakWithSystem(spoken: String, onFinished: (() -> Unit)?) {
+        if (!sysReady) {
+            onFinished?.let { mainHandler.post(it) }
+            return
+        }
         stopPlayer()
+        pendingSysDone = onFinished
         sysTts?.setPitch(PetConfig.getTtsPitch(context))
         sysTts?.setSpeechRate(PetConfig.getTtsRate(context))
         sysTts?.speak(spoken, TextToSpeech.QUEUE_FLUSH, null, "pet_${System.currentTimeMillis()}")
     }
 
-    private suspend fun speakWithGemini(spoken: String): String? = withContext(Dispatchers.IO) {
+    private suspend fun speakWithGemini(spoken: String, onFinished: (() -> Unit)?): String? = withContext(Dispatchers.IO) {
         val keys = PetConfig.getApiKeyList(context)
         if (keys.isEmpty()) return@withContext "Gemini 语音需要配置 API Key，已回退系统 TTS"
         val key = keys[PetConfig.nextKeyCursor(context, keys.size)]
@@ -113,9 +139,7 @@ class TtsManager(private val context: Context) : TextToSpeech.OnInitListener {
         try {
             client.newCall(req).execute().use { resp ->
                 val raw = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) {
-                    return@withContext "Gemini TTS HTTP ${resp.code}"
-                }
+                if (!resp.isSuccessful) return@withContext "Gemini TTS HTTP ${resp.code}"
                 val root = JSONObject(raw)
                 val parts = root.optJSONArray("candidates")
                     ?.optJSONObject(0)
@@ -138,7 +162,7 @@ class TtsManager(private val context: Context) : TextToSpeech.OnInitListener {
                 val isWav = mime.contains("wav", ignoreCase = true) ||
                     (decoded.size >= 4 && decoded[0] == 'R'.code.toByte() && decoded[1] == 'I'.code.toByte())
                 val finalBytes = if (isWav) decoded else wrapPcmToWav(decoded, 24000, 1, 16)
-                playBytes(finalBytes, "pet_gemini_tts.wav")
+                playBytes(finalBytes, "pet_gemini_tts.wav", onFinished)
                 null
             }
         } catch (e: Exception) {
@@ -146,7 +170,7 @@ class TtsManager(private val context: Context) : TextToSpeech.OnInitListener {
         }
     }
 
-    private suspend fun speakWithOpenAiCompat(spoken: String): String? = withContext(Dispatchers.IO) {
+    private suspend fun speakWithOpenAiCompat(spoken: String, onFinished: (() -> Unit)?): String? = withContext(Dispatchers.IO) {
         val url = PetConfig.getCustomTtsUrl(context)
         if (url.isEmpty()) return@withContext "未配置自定义 TTS 地址"
         val key = PetConfig.getCustomTtsKey(context)
@@ -171,12 +195,10 @@ class TtsManager(private val context: Context) : TextToSpeech.OnInitListener {
 
         try {
             client.newCall(builder.build()).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    return@withContext "自定义 TTS HTTP ${resp.code}"
-                }
+                if (!resp.isSuccessful) return@withContext "自定义 TTS HTTP ${resp.code}"
                 val bytes = resp.body?.bytes()
                 if (bytes == null || bytes.size < 64) return@withContext "自定义 TTS 返回空音频"
-                playBytes(bytes, "pet_custom_tts.mp3")
+                playBytes(bytes, "pet_custom_tts.mp3", onFinished)
                 null
             }
         } catch (e: Exception) {
@@ -184,7 +206,7 @@ class TtsManager(private val context: Context) : TextToSpeech.OnInitListener {
         }
     }
 
-    private fun playBytes(bytes: ByteArray, fileName: String) {
+    private fun playBytes(bytes: ByteArray, fileName: String, onFinished: (() -> Unit)?) {
         stopPlayer()
         val f = File(context.cacheDir, fileName)
         f.writeBytes(bytes)
@@ -199,10 +221,12 @@ class TtsManager(private val context: Context) : TextToSpeech.OnInitListener {
             setOnCompletionListener {
                 try { it.release() } catch (_: Exception) {}
                 if (mediaPlayer === it) mediaPlayer = null
+                onFinished?.let { cb -> mainHandler.post(cb) }
             }
             setOnErrorListener { player, _, _ ->
                 try { player.release() } catch (_: Exception) {}
                 if (mediaPlayer === player) mediaPlayer = null
+                onFinished?.let { cb -> mainHandler.post(cb) }
                 true
             }
             prepare()
@@ -244,6 +268,7 @@ class TtsManager(private val context: Context) : TextToSpeech.OnInitListener {
     }
 
     fun stopPlayer() {
+        pendingSysDone = null
         try {
             mediaPlayer?.stop()
             mediaPlayer?.release()

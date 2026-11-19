@@ -19,12 +19,16 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.transition.AutoTransition
+import android.transition.TransitionManager
 import android.util.Base64
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -60,6 +64,8 @@ class PetOverlayService : Service() {
     private lateinit var windowManager: WindowManager
 
     private var rootView: LinearLayout? = null
+    private var topRowView: LinearLayout? = null
+    private var textColView: LinearLayout? = null
     private var actionRow: LinearLayout? = null
     private var layoutParams: WindowManager.LayoutParams? = null
     private var avatarView: ImageView? = null
@@ -72,12 +78,19 @@ class PetOverlayService : Service() {
     private var ttsManager: TtsManager? = null
     private var recorder: MediaRecorder? = null
     private var recordFile: File? = null
+    private var pendingVoiceScreenshot: String? = null
     private var isRecording = false
+    private var isSpeaking = false
     private var isBusy = false
     private var isCapsuleExpanded = false
     private var lastInteractAt = System.currentTimeMillis()
     private var currentMood = "idle"
-    private var lastSpeechText = "双击音量+语音聊天，双击音量-截屏吐槽~"
+    private var lastSpeechText = "双击音量+语音+看屏对话，双击音量-截屏吐槽~"
+
+    // 记录悬浮小人展开气泡前的真实位置，方便右侧展开向左翻折后精准复原
+    private var floatingAnchorX = -1
+    private var floatingAnchorY = -1
+    private var floatingExpandedOnLeft = false
 
     private val autoStopRecordRunnable = Runnable {
         if (isRecording) {
@@ -86,15 +99,15 @@ class PetOverlayService : Service() {
     }
 
     private val collapseRunnable = Runnable {
-        if (!isRecording) {
+        if (!isRecording && !isSpeaking) {
             isCapsuleExpanded = false
-            applyModeVisuals(expandedText = null)
+            applyModeVisuals(expandedText = null, animate = true)
         }
     }
 
     private val idleSleepChecker = object : Runnable {
         override fun run() {
-            if (!isBusy && !isRecording && System.currentTimeMillis() - lastInteractAt >= 90_000L && currentMood != "sleep") {
+            if (!isBusy && !isRecording && !isSpeaking && System.currentTimeMillis() - lastInteractAt >= 90_000L && currentMood != "sleep") {
                 currentMood = "sleep"
                 avatarView?.setImageResource(PetConfig.spriteResForMood("sleep"))
             }
@@ -154,7 +167,7 @@ class PetOverlayService : Service() {
         ensureOverlayAttached()
 
         when (action) {
-            ACTION_REFRESH_UI -> applyModeVisuals(expandedText = if (isCapsuleExpanded) lastSpeechText else null)
+            ACTION_REFRESH_UI -> applyModeVisuals(expandedText = if (isCapsuleExpanded) lastSpeechText else null, animate = false)
             ACTION_TRIGGER_CAPTURE -> triggerScreenReaction()
             ACTION_TOGGLE_VOICE -> toggleVoiceChat()
             ACTION_FEED -> {
@@ -162,13 +175,44 @@ class PetOverlayService : Service() {
                 val delta = intent?.getIntExtra(EXTRA_FEED_DELTA, 6) ?: 6
                 triggerFeedReaction(itemName, delta)
             }
-            else -> applyModeVisuals(expandedText = null)
+            else -> applyModeVisuals(expandedText = null, animate = false)
         }
         return START_STICKY
     }
 
     private fun dp(value: Int): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), resources.displayMetrics).toInt()
+
+    /**
+     * 优先使用 Android 11+ 无障碍永不掉线截屏，未开无障碍时回退到持久化 MediaProjection
+     */
+    private suspend fun captureScreenBestEffort(): String? {
+        if (!PetConfig.isVisionEnabled(this)) return null
+        val accShot = PetHotkeyService.takeScreenshotDataUrl(48)
+        if (!accShot.isNullOrBlank()) return accShot
+        return captureHelper?.captureJpegDataUrl(48)
+    }
+
+    private fun pulseCapsule() {
+        val root = rootView ?: return
+        root.animate().cancel()
+        root.scaleX = 0.92f
+        root.scaleY = 0.92f
+        root.animate()
+            .scaleX(1.06f)
+            .scaleY(1.06f)
+            .setDuration(140L)
+            .setInterpolator(OvershootInterpolator(1.2f))
+            .withEndAction {
+                root.animate()
+                    .scaleX(1.0f)
+                    .scaleY(1.0f)
+                    .setDuration(140L)
+                    .setInterpolator(DecelerateInterpolator())
+                    .start()
+            }
+            .start()
+    }
 
     private fun makePillButton(label: String, bgColor: Int, onClick: () -> Unit): TextView {
         return TextView(this).apply {
@@ -206,7 +250,7 @@ class PetOverlayService : Service() {
 
         val textCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), 0, dp(4), 0)
+            setPadding(dp(10), 0, dp(8), 0)
         }
 
         val titleTv = TextView(this).apply {
@@ -218,7 +262,7 @@ class PetOverlayService : Service() {
         val speechTv = TextView(this).apply {
             setTextColor(Color.WHITE)
             textSize = 13f
-            maxLines = 4
+            maxLines = 5
             visibility = View.GONE
         }
         textCol.addView(titleTv)
@@ -228,7 +272,7 @@ class PetOverlayService : Service() {
             setTextColor(Color.parseColor("#CBD5E1"))
             textSize = 11f
             gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            setPadding(dp(12), 0, dp(6), 0)
+            setPadding(dp(10), 0, dp(6), 0)
             this.text = "······"
         }
 
@@ -236,7 +280,6 @@ class PetOverlayService : Service() {
         rowTop.addView(textCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         rowTop.addView(dotsTv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
-        // 灵动胶囊展开后的底部操作条
         val rowActions = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -256,7 +299,7 @@ class PetOverlayService : Service() {
             mainHandler.removeCallbacks(collapseRunnable)
             if (isRecording) stopVoiceAndSend()
             isCapsuleExpanded = false
-            applyModeVisuals(expandedText = null)
+            applyModeVisuals(expandedText = null, animate = true)
         }
         fun btnLp() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             marginEnd = dp(6)
@@ -301,7 +344,7 @@ class PetOverlayService : Service() {
             }
             PetConfig.setOverlayMode(this, next)
             isCapsuleExpanded = true
-            applyModeVisuals(expandedText = "已切换形态：${next.label}")
+            applyModeVisuals(expandedText = "已切换形态：${next.label}", animate = true)
             mainHandler.removeCallbacks(collapseRunnable)
             mainHandler.postDelayed(collapseRunnable, 2400L)
         }
@@ -327,6 +370,8 @@ class PetOverlayService : Service() {
                         if (PetConfig.getOverlayMode(this) == OverlayMode.FLOATING) {
                             lp.x = startX + dx.toInt()
                             lp.y = startY + dy.toInt()
+                            floatingAnchorX = lp.x
+                            floatingAnchorY = lp.y
                             try { windowManager.updateViewLayout(root, lp) } catch (_: Exception) {}
                         }
                     }
@@ -340,10 +385,10 @@ class PetOverlayService : Service() {
                             isCapsuleExpanded = !isCapsuleExpanded
                             mainHandler.removeCallbacks(collapseRunnable)
                             if (isCapsuleExpanded) {
-                                applyModeVisuals(expandedText = lastSpeechText)
-                                mainHandler.postDelayed(collapseRunnable, 10000L)
+                                applyModeVisuals(expandedText = lastSpeechText, animate = true)
+                                mainHandler.postDelayed(collapseRunnable, 12000L)
                             } else {
-                                applyModeVisuals(expandedText = null)
+                                applyModeVisuals(expandedText = null, animate = true)
                             }
                         } else {
                             triggerScreenReaction()
@@ -356,6 +401,8 @@ class PetOverlayService : Service() {
         }
 
         rootView = root
+        topRowView = rowTop
+        textColView = textCol
         actionRow = rowActions
         avatarView = avatar
         titleView = titleTv
@@ -371,7 +418,28 @@ class PetOverlayService : Service() {
         }
     }
 
-    private fun applyModeVisuals(expandedText: String?) {
+    private fun setTopRowOrder(bubbleOnLeft: Boolean) {
+        val row = topRowView ?: return
+        val avatar = avatarView ?: return
+        val textCol = textColView ?: return
+        val dots = pillDotsView ?: return
+
+        val wantFirst = if (bubbleOnLeft) textCol else avatar
+        if (row.getChildAt(0) === wantFirst) return
+
+        row.removeAllViews()
+        if (bubbleOnLeft) {
+            row.addView(textCol, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            row.addView(avatar)
+            row.addView(dots)
+        } else {
+            row.addView(avatar)
+            row.addView(textCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(dots)
+        }
+    }
+
+    private fun applyModeVisuals(expandedText: String?, animate: Boolean = false) {
         val root = rootView ?: return
         val avatar = avatarView ?: return
         val title = titleView ?: return
@@ -390,10 +458,19 @@ class PetOverlayService : Service() {
 
         voiceBtnView?.text = if (isRecording) "📤 说完了" else "🎙️ 语音"
 
+        if (animate) {
+            try {
+                TransitionManager.beginDelayedTransition(root, AutoTransition().apply {
+                    duration = 230L
+                })
+            } catch (_: Exception) {}
+        }
+
         val bg = GradientDrawable().apply { shape = GradientDrawable.RECTANGLE }
 
         when (mode) {
             OverlayMode.CAPSULE -> {
+                setTopRowOrder(bubbleOnLeft = false)
                 lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
                 lp.x = 0
                 lp.y = dp(PetConfig.getCapsuleTopOffsetDp(this))
@@ -401,7 +478,7 @@ class PetOverlayService : Service() {
                     lp.width = (dm.widthPixels - dp(24)).coerceAtMost(dp(360))
                     lp.height = WindowManager.LayoutParams.WRAP_CONTENT
                     bg.cornerRadius = dp(26).toFloat()
-                    bg.setColor(Color.argb(bgAlpha.coerceAtLeast(225), 16, 17, 22))
+                    bg.setColor(Color.argb(bgAlpha.coerceAtLeast(228), 16, 17, 22))
                     bg.setStroke(dp(1), Color.argb(65, 255, 255, 255))
                     root.background = bg
                     root.setPadding(dp(16), dp(14), dp(16), dp(12))
@@ -416,7 +493,7 @@ class PetOverlayService : Service() {
                     speech.text = expandedText.orEmpty()
                     actions.visibility = View.VISIBLE
                 } else {
-                    lp.width = dp(138)
+                    lp.width = dp(146)
                     lp.height = dp(32)
                     bg.cornerRadius = dp(18).toFloat()
                     bg.setColor(Color.BLACK)
@@ -431,6 +508,7 @@ class PetOverlayService : Service() {
                     dots.text = when {
                         isRecording -> "🎙️ 聆听中"
                         isBusy -> "● 思考中"
+                        isSpeaking -> "🔊 播报中"
                         else -> "······"
                     }
                     actions.visibility = View.GONE
@@ -438,13 +516,36 @@ class PetOverlayService : Service() {
             }
             OverlayMode.FLOATING -> {
                 val petDp = PetConfig.getPetSizeDp(this)
+                val petPx = dp(petDp)
                 lp.gravity = Gravity.TOP or Gravity.START
                 lp.width = WindowManager.LayoutParams.WRAP_CONTENT
                 lp.height = WindowManager.LayoutParams.WRAP_CONTENT
-                if (lp.x == 0 && lp.y < dp(50)) {
-                    lp.x = dm.widthPixels - dp(petDp + 24)
-                    lp.y = (dm.heightPixels * 0.58f).toInt()
+
+                if (floatingAnchorX < 0 || floatingAnchorY < 0) {
+                    floatingAnchorX = dm.widthPixels - petPx - dp(16)
+                    floatingAnchorY = (dm.heightPixels * 0.58f).toInt()
                 }
+
+                // 根据小人在屏幕左半边还是右半边，智能决定气泡向左还是向右展开
+                val onRightHalf = (floatingAnchorX + petPx / 2) > (dm.widthPixels / 2)
+                val bubbleMaxPx = dp(200)
+
+                if (isExpanded) {
+                    setTopRowOrder(bubbleOnLeft = onRightHalf)
+                    floatingExpandedOnLeft = onRightHalf
+                    lp.x = if (onRightHalf) {
+                        (floatingAnchorX - bubbleMaxPx - dp(12)).coerceAtLeast(dp(8))
+                    } else {
+                        floatingAnchorX.coerceAtMost(dm.widthPixels - petPx - dp(12))
+                    }
+                    lp.y = floatingAnchorY
+                } else {
+                    setTopRowOrder(bubbleOnLeft = false)
+                    floatingExpandedOnLeft = false
+                    lp.x = floatingAnchorX
+                    lp.y = floatingAnchorY
+                }
+
                 bg.cornerRadius = dp(18).toFloat()
                 bg.setColor(if (isExpanded) Color.argb(bgAlpha, 20, 22, 32) else Color.TRANSPARENT)
                 if (isExpanded) bg.setStroke(dp(1), Color.argb(140, 129, 140, 248))
@@ -452,16 +553,17 @@ class PetOverlayService : Service() {
                 root.setPadding(dp(6), dp(6), dp(8), dp(6))
 
                 avatar.visibility = View.VISIBLE
-                avatar.layoutParams = LinearLayout.LayoutParams(dp(petDp), dp(petDp))
+                avatar.layoutParams = LinearLayout.LayoutParams(petPx, petPx)
                 dots.visibility = View.GONE
                 title.visibility = View.GONE
                 speech.visibility = if (isExpanded) View.VISIBLE else View.GONE
-                speech.maxWidth = dp(200)
+                speech.maxWidth = bubbleMaxPx
                 speech.setTextColor(Color.WHITE)
                 speech.text = expandedText.orEmpty()
                 actions.visibility = View.GONE
             }
             OverlayMode.HIDDEN -> {
+                setTopRowOrder(bubbleOnLeft = true)
                 lp.gravity = Gravity.END or Gravity.CENTER_VERTICAL
                 lp.width = WindowManager.LayoutParams.WRAP_CONTENT
                 lp.height = WindowManager.LayoutParams.WRAP_CONTENT
@@ -475,7 +577,11 @@ class PetOverlayService : Service() {
                 avatar.visibility = if (isExpanded) View.VISIBLE else View.GONE
                 avatar.layoutParams = LinearLayout.LayoutParams(dp(38), dp(38))
                 dots.visibility = if (isExpanded) View.GONE else View.VISIBLE
-                dots.text = if (isRecording) "🎙️" else "🐾"
+                dots.text = when {
+                    isRecording -> "🎙️"
+                    isSpeaking -> "🔊"
+                    else -> "🐾"
+                }
                 title.visibility = View.GONE
                 speech.visibility = if (isExpanded) View.VISIBLE else View.GONE
                 speech.maxWidth = dp(220)
@@ -488,7 +594,34 @@ class PetOverlayService : Service() {
         avatar.setImageResource(PetConfig.spriteResForMood(currentMood))
         try {
             windowManager.updateViewLayout(root, lp)
+            if (animate && mode == OverlayMode.CAPSULE) {
+                root.animate().cancel()
+                root.scaleX = if (isExpanded) 0.72f else 1.08f
+                root.scaleY = if (isExpanded) 0.65f else 1.12f
+                root.alpha = 0.85f
+                root.animate()
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .alpha(1f)
+                    .setDuration(240L)
+                    .setInterpolator(if (isExpanded) OvershootInterpolator(0.75f) else DecelerateInterpolator())
+                    .start()
+            }
         } catch (_: Exception) {}
+    }
+
+    private fun presentReply(text: String, stealth: Boolean) {
+        lastSpeechText = text
+        if (stealth) {
+            // 纯语音窥屏模式：不弹大卡片，仅顶部黑条轻跳 + 后台语音播报
+            isCapsuleExpanded = false
+            applyModeVisuals(expandedText = null, animate = false)
+            pulseCapsule()
+        } else {
+            isCapsuleExpanded = true
+            applyModeVisuals(expandedText = text, animate = true)
+        }
+        speakIfEnabled(text)
     }
 
     private fun toggleVoiceChat() {
@@ -501,14 +634,23 @@ class PetOverlayService : Service() {
         if (!hasMic) {
             isCapsuleExpanded = true
             lastSpeechText = "⚠️ 请先在猫娘 App 首页点「授权麦克风」再使用语音对话~"
-            applyModeVisuals(expandedText = lastSpeechText)
+            applyModeVisuals(expandedText = lastSpeechText, animate = true)
             mainHandler.removeCallbacks(collapseRunnable)
             mainHandler.postDelayed(collapseRunnable, 5000L)
             return
         }
 
         ttsManager?.stopPlayer()
+        isSpeaking = false
         lastInteractAt = System.currentTimeMillis()
+        val stealth = PetConfig.isStealthAudioOnly(this)
+
+        // 同步在开录瞬间截取当前屏幕，让语音对话也能看懂你正在看的画面！
+        pendingVoiceScreenshot = null
+        scope.launch {
+            pendingVoiceScreenshot = captureScreenBestEffort()
+        }
+
         try {
             val outFile = File(cacheDir, "pet_voice_input.m4a")
             if (outFile.exists()) outFile.delete()
@@ -531,16 +673,22 @@ class PetOverlayService : Service() {
             recorder = rec
             isRecording = true
             currentMood = "think"
-            isCapsuleExpanded = true
             mainHandler.removeCallbacks(collapseRunnable)
-            applyModeVisuals(expandedText = "🎙️ 正在听你说话… 说完再按一次快捷键（或 8 秒自动发送）")
+            if (stealth) {
+                isCapsuleExpanded = false
+                applyModeVisuals(expandedText = null, animate = false)
+                pulseCapsule()
+            } else {
+                isCapsuleExpanded = true
+                applyModeVisuals(expandedText = "🎙️ 正在听你说话（已同步看屏）… 说完再按一次快捷键发送", animate = true)
+            }
             mainHandler.removeCallbacks(autoStopRecordRunnable)
-            mainHandler.postDelayed(autoStopRecordRunnable, 8000L)
+            mainHandler.postDelayed(autoStopRecordRunnable, 9000L)
         } catch (e: Exception) {
             cleanupRecorder()
             isRecording = false
             isCapsuleExpanded = true
-            applyModeVisuals(expandedText = "⚠️ 录音启动失败：${e.message}")
+            applyModeVisuals(expandedText = "⚠️ 录音启动失败：${e.message}", animate = true)
             mainHandler.postDelayed(collapseRunnable, 4000L)
         }
     }
@@ -548,6 +696,7 @@ class PetOverlayService : Service() {
     private fun stopVoiceAndSend() {
         mainHandler.removeCallbacks(autoStopRecordRunnable)
         isRecording = false
+        val stealth = PetConfig.isStealthAudioOnly(this)
         val file = recordFile
         try {
             recorder?.stop()
@@ -557,9 +706,13 @@ class PetOverlayService : Service() {
         }
 
         if (file == null || !file.exists() || file.length() < 500L) {
-            isCapsuleExpanded = true
-            applyModeVisuals(expandedText = "🎙️ 录音太短了，没听清呀~")
-            mainHandler.postDelayed(collapseRunnable, 3500L)
+            if (!stealth) {
+                isCapsuleExpanded = true
+                applyModeVisuals(expandedText = "🎙️ 录音太短了，没听清呀~", animate = true)
+                mainHandler.postDelayed(collapseRunnable, 3500L)
+            } else {
+                applyModeVisuals(expandedText = null, animate = false)
+            }
             return
         }
 
@@ -574,28 +727,33 @@ class PetOverlayService : Service() {
 
         isBusy = true
         currentMood = "think"
-        isCapsuleExpanded = true
-        applyModeVisuals(expandedText = "✨ 听到了！猫娘正在想怎么回你…")
+        if (stealth) {
+            applyModeVisuals(expandedText = null, animate = false)
+            pulseCapsule()
+        } else {
+            isCapsuleExpanded = true
+            applyModeVisuals(expandedText = "✨ 听到了！正在结合屏幕画面思考…", animate = false)
+        }
 
         scope.launch {
             try {
                 PetConfig.rollRandomMoodIfNeeded(this@PetOverlayService)
-                val res = LlmClient.generateVoiceChat(this@PetOverlayService, audioB64, "audio/mp4")
+                val shot = pendingVoiceScreenshot ?: captureScreenBestEffort()
+                pendingVoiceScreenshot = null
+                val res = LlmClient.generateVoiceChat(this@PetOverlayService, audioB64, "audio/mp4", shot)
                 if (res.ok) {
                     currentMood = res.mood
-                    lastSpeechText = res.text
-                    isCapsuleExpanded = true
-                    applyModeVisuals(expandedText = res.text)
-                    speakIfEnabled(res.text)
+                    presentReply(res.text, stealth)
                 } else {
                     currentMood = "dizzy"
                     lastSpeechText = "⚠️ ${res.error}"
-                    applyModeVisuals(expandedText = lastSpeechText)
+                    isCapsuleExpanded = !stealth
+                    applyModeVisuals(expandedText = if (stealth) null else lastSpeechText, animate = !stealth)
+                    scheduleCollapseAfterDelay(5000L)
                 }
             } finally {
                 isBusy = false
-                mainHandler.removeCallbacks(collapseRunnable)
-                mainHandler.postDelayed(collapseRunnable, 9500L)
+                if (stealth && !isSpeaking) applyModeVisuals(expandedText = null, animate = false)
             }
         }
     }
@@ -611,40 +769,41 @@ class PetOverlayService : Service() {
         isBusy = true
         lastInteractAt = System.currentTimeMillis()
         PetConfig.rollRandomMoodIfNeeded(this)
+        val stealth = PetConfig.isStealthAudioOnly(this)
 
         currentMood = "think"
-        isCapsuleExpanded = true
-        applyModeVisuals(expandedText = "喵呜？正在瞄一眼你的屏幕…")
         mainHandler.removeCallbacks(collapseRunnable)
+        if (stealth) {
+            isCapsuleExpanded = false
+            applyModeVisuals(expandedText = null, animate = false)
+            pulseCapsule()
+        } else {
+            isCapsuleExpanded = true
+            applyModeVisuals(expandedText = "喵呜？正在瞄一眼你的屏幕…", animate = true)
+        }
 
         scope.launch {
             try {
-                val screenshot = if (PetConfig.isVisionEnabled(this@PetOverlayService)) {
-                    captureHelper?.captureJpegDataUrl(48)
-                } else {
-                    null
-                }
+                val screenshot = captureScreenBestEffort()
                 val prompt = if (screenshot != null) {
                     "用户刚刚一键唤醒了你，想听你吐槽或点评此刻手机屏幕上的画面。"
                 } else {
-                    "用户刚刚唤醒了你（未开启截屏权限），请用当前人设和好感度打个招呼或吐槽一句。"
+                    "用户刚刚唤醒了你（暂未获取到截屏画面），请用当前人设和好感度打个招呼或吐槽一句。"
                 }
                 val res = LlmClient.generateReaction(this@PetOverlayService, prompt, screenshot)
                 if (res.ok) {
                     currentMood = res.mood
-                    lastSpeechText = res.text
-                    isCapsuleExpanded = true
-                    applyModeVisuals(expandedText = res.text)
-                    speakIfEnabled(res.text)
+                    presentReply(res.text, stealth)
                 } else {
                     currentMood = "dizzy"
                     lastSpeechText = "⚠️ ${res.error}"
-                    applyModeVisuals(expandedText = lastSpeechText)
+                    isCapsuleExpanded = !stealth
+                    applyModeVisuals(expandedText = if (stealth) null else lastSpeechText, animate = !stealth)
+                    scheduleCollapseAfterDelay(5000L)
                 }
             } finally {
                 isBusy = false
-                mainHandler.removeCallbacks(collapseRunnable)
-                mainHandler.postDelayed(collapseRunnable, 9000L)
+                if (stealth && !isSpeaking) applyModeVisuals(expandedText = null, animate = false)
             }
         }
     }
@@ -653,10 +812,15 @@ class PetOverlayService : Service() {
         if (isBusy || isRecording) return
         isBusy = true
         lastInteractAt = System.currentTimeMillis()
+        val stealth = PetConfig.isStealthAudioOnly(this)
         currentMood = if (delta >= 0) "eat" else "disgust"
-        isCapsuleExpanded = true
-        applyModeVisuals(expandedText = "投喂了「$itemName」（好感 ${if (delta >= 0) "+$delta" else "$delta"}）…")
         mainHandler.removeCallbacks(collapseRunnable)
+        if (!stealth) {
+            isCapsuleExpanded = true
+            applyModeVisuals(expandedText = "投喂了「$itemName」（好感 ${if (delta >= 0) "+$delta" else "$delta"}）…", animate = true)
+        } else {
+            pulseCapsule()
+        }
 
         scope.launch {
             try {
@@ -668,25 +832,41 @@ class PetOverlayService : Service() {
                 )
                 if (res.ok) {
                     currentMood = res.mood
-                    lastSpeechText = res.text
-                    applyModeVisuals(expandedText = res.text)
-                    speakIfEnabled(res.text)
+                    presentReply(res.text, stealth)
                 } else {
-                    lastSpeechText = if (delta >= 0) "啊呜~ 吃掉$itemName 啦！" else "呸呸！才不要吃$itemName！"
-                    applyModeVisuals(expandedText = lastSpeechText)
+                    presentReply(if (delta >= 0) "啊呜~ 吃掉$itemName 啦！" else "呸呸！才不要吃$itemName！", stealth)
                 }
             } finally {
                 isBusy = false
-                mainHandler.removeCallbacks(collapseRunnable)
-                mainHandler.postDelayed(collapseRunnable, 9000L)
             }
         }
     }
 
+    private fun scheduleCollapseAfterDelay(delayMs: Long) {
+        mainHandler.removeCallbacks(collapseRunnable)
+        mainHandler.postDelayed(collapseRunnable, delayMs)
+    }
+
     private fun speakIfEnabled(rawText: String) {
-        if (!PetConfig.isTtsEnabled(this)) return
+        if (!PetConfig.isTtsEnabled(this)) {
+            scheduleCollapseAfterDelay(10000L)
+            return
+        }
+        isSpeaking = true
+        mainHandler.removeCallbacks(collapseRunnable)
+        if (PetConfig.isStealthAudioOnly(this)) {
+            applyModeVisuals(expandedText = null, animate = false)
+        }
         scope.launch {
-            ttsManager?.speak(rawText)
+            ttsManager?.speak(rawText) {
+                isSpeaking = false
+                if (PetConfig.isStealthAudioOnly(this@PetOverlayService)) {
+                    applyModeVisuals(expandedText = null, animate = false)
+                } else {
+                    // 语音播报完整结束后，再留 3 秒方便回看文字再平滑收起
+                    scheduleCollapseAfterDelay(3000L)
+                }
+            }
         }
     }
 
@@ -717,7 +897,7 @@ class PetOverlayService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Gemini 猫娘桌宠运行中")
-            .setContentText("双击音量+语音聊天 · 双击音量-截屏吐槽")
+            .setContentText("双击音量+语音看屏对话 · 双击音量-截屏吐槽")
             .setSmallIcon(R.drawable.pet_icon)
             .setContentIntent(openIntent)
             .addAction(0, "🎙️ 语音对话", voiceIntent)

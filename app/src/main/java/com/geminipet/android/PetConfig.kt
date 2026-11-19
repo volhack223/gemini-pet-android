@@ -190,6 +190,9 @@ object PetConfig {
     fun getBubbleAlpha(ctx: Context): Float = prefs(ctx).getFloat("bubble_alpha", 0.88f).coerceIn(0.35f, 1.0f)
     fun setBubbleAlpha(ctx: Context, alpha: Float) = prefs(ctx).edit().putFloat("bubble_alpha", alpha.coerceIn(0.35f, 1.0f)).apply()
 
+    fun isStealthAudioOnly(ctx: Context): Boolean = prefs(ctx).getBoolean("stealth_audio_only", false)
+    fun setStealthAudioOnly(ctx: Context, enabled: Boolean) = prefs(ctx).edit().putBoolean("stealth_audio_only", enabled).apply()
+
     fun isVisionEnabled(ctx: Context): Boolean = prefs(ctx).getBoolean("vision_enabled", true)
     fun setVisionEnabled(ctx: Context, enabled: Boolean) = prefs(ctx).edit().putBoolean("vision_enabled", enabled).apply()
 

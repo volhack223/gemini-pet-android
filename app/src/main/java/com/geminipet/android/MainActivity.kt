@@ -50,9 +50,13 @@ class MainActivity : AppCompatActivity() {
                 putExtra(PetOverlayService.EXTRA_RESULT_DATA, result.data)
             }
             startForegroundService(svc)
-            Toast.makeText(this, "截屏与悬浮已就绪！点顶部黑条或按音量快捷键即可互动~", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "桌宠已启动！建议开启无障碍服务，截屏永不掉线~", Toast.LENGTH_SHORT).show()
         } else {
-            Toast.makeText(this, "未授予截屏权限，仍可使用语音和文字互动", Toast.LENGTH_SHORT).show()
+            val svc = Intent(this, PetOverlayService::class.java).apply {
+                action = PetOverlayService.ACTION_START
+            }
+            startForegroundService(svc)
+            Toast.makeText(this, "已启动悬浮窗（开启无障碍服务后即可免弹窗永久截屏）", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -68,10 +72,37 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         hotkeyStatusLabel?.text = if (isHotkeyAccessibilityEnabled()) {
-            "状态：✅ 全局快捷键监听已开启"
+            "状态：✅ 已开启（支持全局音量快捷键 + 安卓 11+ 永不掉线静默截屏）"
         } else {
-            "状态：⚠️ 未开启无障碍服务（点上方按钮开启「Gemini 猫娘快捷按键监听」）"
+            "状态：⚠️ 未开启无障碍服务（开启后同时解锁全局快捷键与永久免掉线截屏）"
         }
+    }
+
+    private fun <T> buildRadioGroup(
+        items: List<T>,
+        selected: T,
+        orientation: Int,
+        labelOf: (T) -> String,
+        textSizeSp: Float = 12.5f,
+        onSelect: (T) -> Unit
+    ): RadioGroup {
+        val group = RadioGroup(this).apply { this.orientation = orientation }
+        var checkedId = View.NO_ID
+        items.forEach { item ->
+            val rbId = View.generateViewId()
+            val rb = RadioButton(this).apply {
+                id = rbId
+                this.text = labelOf(item)
+                this.textSize = textSizeSp
+                setOnClickListener { onSelect(item) }
+            }
+            group.addView(rb)
+            if (item == selected) checkedId = rbId
+        }
+        if (checkedId != View.NO_ID) {
+            group.check(checkedId)
+        }
+        return group
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -99,7 +130,7 @@ class MainActivity : AppCompatActivity() {
         }
         val logo = ImageView(this).apply { setImageResource(R.drawable.pet_idle) }
         val titleTxt = TextView(this).apply {
-            this.text = "🐾 Gemini 猫娘手机桌宠 v1.2\n灵动胶囊 · 语音对话 · 截屏吐槽 · AI 语音"
+            this.text = "🐾 Gemini 猫娘手机桌宠 v1.3\n丝滑灵动胶囊 · 纯语音窥屏 · 永久截屏"
             textSize = 14.5f
             setTextColor(Color.parseColor("#202A5C"))
             setPadding(dp(12), 0, 0, 0)
@@ -135,7 +166,7 @@ class MainActivity : AppCompatActivity() {
         })
         val btnRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         btnRow2.addView(Button(this).apply {
-            this.text = "🚀 启动并授权截屏"
+            this.text = "🚀 启动桌宠"
             setOnClickListener {
                 if (!Settings.canDrawOverlays(this@MainActivity)) {
                     Toast.makeText(this@MainActivity, "请先点上方「授权悬浮窗」", Toast.LENGTH_SHORT).show()
@@ -149,8 +180,17 @@ class MainActivity : AppCompatActivity() {
                 if (perms.isNotEmpty()) {
                     requestPermissions(perms.toTypedArray(), 100)
                 }
-                val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                screenCaptureLauncher.launch(mpm.createScreenCaptureIntent())
+                // 如果已开启无障碍服务（Android 11+），直接免弹窗永久截屏启动；否则请求 MediaProjection
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && isHotkeyAccessibilityEnabled()) {
+                    val svc = Intent(this@MainActivity, PetOverlayService::class.java).apply {
+                        action = PetOverlayService.ACTION_START
+                    }
+                    startForegroundService(svc)
+                    Toast.makeText(this@MainActivity, "已使用无障碍永久截屏模式启动 ✅", Toast.LENGTH_SHORT).show()
+                } else {
+                    val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                    screenCaptureLauncher.launch(mpm.createScreenCaptureIntent())
+                }
             }
         })
         btnRow2.addView(Button(this).apply {
@@ -163,21 +203,26 @@ class MainActivity : AppCompatActivity() {
         root.addView(btnRow2)
 
         // 2. 显示形态、小人大小、灵动胶囊位置调节
-        root.addView(sectionTitle("2. 显示形态与大小/位置调节"))
-        val modeGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
-        val curMode = PetConfig.getOverlayMode(this)
-        OverlayMode.entries.forEach { mode ->
-            modeGroup.addView(RadioButton(this).apply {
-                this.text = mode.label
-                textSize = 12.5f
-                isChecked = mode == curMode
-                setOnClickListener {
-                    PetConfig.setOverlayMode(this@MainActivity, mode)
-                    startService(Intent(this@MainActivity, PetOverlayService::class.java).setAction(PetOverlayService.ACTION_REFRESH_UI))
-                }
-            })
+        root.addView(sectionTitle("2. 显示形态、窥屏模式与大小/位置调节"))
+        val modeGroup = buildRadioGroup(
+            items = OverlayMode.entries,
+            selected = PetConfig.getOverlayMode(this),
+            orientation = RadioGroup.HORIZONTAL,
+            labelOf = { it.label }
+        ) { mode ->
+            PetConfig.setOverlayMode(this@MainActivity, mode)
+            startService(Intent(this@MainActivity, PetOverlayService::class.java).setAction(PetOverlayService.ACTION_REFRESH_UI))
         }
         root.addView(modeGroup)
+
+        val cbStealth = CheckBox(this).apply {
+            this.text = "🎧 纯语音窥屏模式（不弹大卡片，仅顶部胶囊轻跳+后台播报语音）"
+            isChecked = PetConfig.isStealthAudioOnly(this@MainActivity)
+            setOnCheckedChangeListener { _, checked ->
+                PetConfig.setStealthAudioOnly(this@MainActivity, checked)
+            }
+        }
+        root.addView(cbStealth)
 
         val sizeLabel = TextView(this).apply { this.text = "悬浮小人大小：${PetConfig.getPetSizeDp(this@MainActivity)} dp" }
         val sizeSeek = SeekBar(this).apply {
@@ -241,45 +286,35 @@ class MainActivity : AppCompatActivity() {
         root.addView(alphaSeek)
         root.addView(cbVision)
 
-        // 3. 全局自定义双快捷键（语音对话 + 截屏吐槽）
-        root.addView(sectionTitle("3. 自定义硬件快捷键（任意 App 内一键触发）"))
+        // 3. 全局自定义双快捷键
+        root.addView(sectionTitle("3. 自定义硬件快捷键 & 永久截屏授权"))
         root.addView(TextView(this).apply {
-            this.text = "🎙️ 语音输入对话快捷键（按一下开录，再按一下发送，默认双击音量+）："
+            this.text = "🎙️ 语音+看屏对话快捷键（按一下开录并截屏，再按一下发送）："
             textSize = 12.5f
             setTextColor(Color.parseColor("#0F172A"))
         })
-        val voiceHotkeyGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
-        val curVoiceHk = PetConfig.getVoiceHotkey(this)
-        HotkeyBinding.entries.forEach { hb ->
-            voiceHotkeyGroup.addView(RadioButton(this).apply {
-                this.text = hb.label
-                textSize = 12.5f
-                isChecked = hb == curVoiceHk
-                setOnClickListener { PetConfig.setVoiceHotkey(this@MainActivity, hb) }
-            })
-        }
-        root.addView(voiceHotkeyGroup)
+        root.addView(buildRadioGroup(
+            items = HotkeyBinding.entries,
+            selected = PetConfig.getVoiceHotkey(this),
+            orientation = RadioGroup.VERTICAL,
+            labelOf = { it.label }
+        ) { PetConfig.setVoiceHotkey(this@MainActivity, it) })
 
         root.addView(TextView(this).apply {
-            this.text = "📸 截屏吐槽对话快捷键（默认双击音量-）："
+            this.text = "📸 纯截屏吐槽快捷键："
             textSize = 12.5f
             setTextColor(Color.parseColor("#0F172A"))
             setPadding(0, dp(8), 0, 0)
         })
-        val captureHotkeyGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
-        val curCapHk = PetConfig.getCaptureHotkey(this)
-        HotkeyBinding.entries.forEach { hb ->
-            captureHotkeyGroup.addView(RadioButton(this).apply {
-                this.text = hb.label
-                textSize = 12.5f
-                isChecked = hb == curCapHk
-                setOnClickListener { PetConfig.setCaptureHotkey(this@MainActivity, hb) }
-            })
-        }
-        root.addView(captureHotkeyGroup)
+        root.addView(buildRadioGroup(
+            items = HotkeyBinding.entries,
+            selected = PetConfig.getCaptureHotkey(this),
+            orientation = RadioGroup.VERTICAL,
+            labelOf = { it.label }
+        ) { PetConfig.setCaptureHotkey(this@MainActivity, it) })
 
         val btnAcc = Button(this).apply {
-            this.text = "⌨️ 去开启无障碍按键权限"
+            this.text = "⌨️ 去开启无障碍服务（快捷键 + 永不掉线截屏）"
             setOnClickListener {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             }
@@ -294,7 +329,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(tvHotkeyStatus)
 
         // 4. 多引擎语音播报
-        root.addView(sectionTitle("4. 语音播报（多引擎 TTS 升级）"))
+        root.addView(sectionTitle("4. 语音播报（多引擎 TTS）"))
         val cbTts = CheckBox(this).apply {
             this.text = "🔊 开启语音播报"
             isChecked = PetConfig.isTtsEnabled(this@MainActivity)
@@ -302,7 +337,6 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(cbTts)
 
-        val ttsEngineGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
         val curEngine = PetConfig.getTtsEngine(this)
 
         val geminiTtsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -310,16 +344,14 @@ class MainActivity : AppCompatActivity() {
             hint = "Gemini TTS 模型（默认 gemini-2.5-flash-preview-tts）"
             setText(PetConfig.getGeminiTtsModel(this@MainActivity))
         }
-        val geminiVoiceGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
-        val curVoice = PetConfig.getGeminiTtsVoice(this)
-        PetConfig.GEMINI_TTS_VOICES.forEach { (voiceId, label) ->
-            geminiVoiceGroup.addView(RadioButton(this).apply {
-                this.text = label
-                textSize = 12.5f
-                isChecked = voiceId == curVoice
-                setOnClickListener { PetConfig.setGeminiTtsVoice(this@MainActivity, voiceId) }
-            })
-        }
+        val curVoicePair = PetConfig.GEMINI_TTS_VOICES.firstOrNull { it.first == PetConfig.getGeminiTtsVoice(this) }
+            ?: PetConfig.GEMINI_TTS_VOICES.first()
+        val geminiVoiceGroup = buildRadioGroup(
+            items = PetConfig.GEMINI_TTS_VOICES,
+            selected = curVoicePair,
+            orientation = RadioGroup.VERTICAL,
+            labelOf = { it.second }
+        ) { PetConfig.setGeminiTtsVoice(this@MainActivity, it.first) }
         geminiTtsBox.addView(TextView(this).apply {
             this.text = "复用下方 Gemini API Key，零额外配置即可发声："
             textSize = 12f
@@ -391,17 +423,17 @@ class MainActivity : AppCompatActivity() {
         }
         updateTtsBoxes(curEngine)
 
-        TtsEngine.entries.forEach { eng ->
-            ttsEngineGroup.addView(RadioButton(this).apply {
-                this.text = eng.label
-                textSize = 12f
-                isChecked = eng == curEngine
-                setOnClickListener {
-                    PetConfig.setTtsEngine(this@MainActivity, eng)
-                    updateTtsBoxes(eng)
-                }
-            })
+        val ttsEngineGroup = buildRadioGroup(
+            items = TtsEngine.entries,
+            selected = curEngine,
+            orientation = RadioGroup.HORIZONTAL,
+            labelOf = { it.label },
+            textSizeSp = 12f
+        ) { eng ->
+            PetConfig.setTtsEngine(this@MainActivity, eng)
+            updateTtsBoxes(eng)
         }
+
         val ttsTestStatus = TextView(this).apply { textSize = 12f; setPadding(0, dp(4), 0, dp(4)) }
         val ttsBtnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         ttsBtnRow.addView(Button(this).apply {
@@ -493,31 +525,28 @@ class MainActivity : AppCompatActivity() {
 
         // 6. 性格 × 行为选择
         root.addView(sectionTitle("6. 性格 × 行为人设组合"))
-        val traitGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
-        PetConfig.TRAITS.forEach { t ->
-            traitGroup.addView(RadioButton(this).apply {
-                this.text = t.name
-                textSize = 12f
-                isChecked = t.id == PetConfig.getActiveTraitId(this@MainActivity)
-                setOnClickListener { PetConfig.setActiveTraitId(this@MainActivity, t.id) }
-            })
-        }
-        val behaviorGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
-        PetConfig.BEHAVIORS.forEach { b ->
-            behaviorGroup.addView(RadioButton(this).apply {
-                this.text = b.name
-                textSize = 12f
-                isChecked = b.id == PetConfig.getActiveBehaviorId(this@MainActivity)
-                setOnClickListener { PetConfig.setActiveBehaviorId(this@MainActivity, b.id) }
-            })
-        }
+        val curTrait = PetConfig.TRAITS.firstOrNull { it.id == PetConfig.getActiveTraitId(this) } ?: PetConfig.TRAITS.first()
+        val curBehavior = PetConfig.BEHAVIORS.firstOrNull { it.id == PetConfig.getActiveBehaviorId(this) } ?: PetConfig.BEHAVIORS.first()
+        root.addView(buildRadioGroup(
+            items = PetConfig.TRAITS,
+            selected = curTrait,
+            orientation = RadioGroup.HORIZONTAL,
+            labelOf = { it.name },
+            textSizeSp = 12f
+        ) { PetConfig.setActiveTraitId(this@MainActivity, it.id) })
+        root.addView(buildRadioGroup(
+            items = PetConfig.BEHAVIORS,
+            selected = curBehavior,
+            orientation = RadioGroup.HORIZONTAL,
+            labelOf = { it.name },
+            textSizeSp = 12f
+        ) { PetConfig.setActiveBehaviorId(this@MainActivity, it.id) })
+
         val cbRandomMood = CheckBox(this).apply {
             this.text = "🎲 开启随机心情（每 30 分钟自动换性格×行为）"
             isChecked = PetConfig.isRandomMood(this@MainActivity)
             setOnCheckedChangeListener { _, checked -> PetConfig.setRandomMood(this@MainActivity, checked) }
         }
-        root.addView(traitGroup)
-        root.addView(behaviorGroup)
         root.addView(cbRandomMood)
 
         // 7. 大模型 API 配置
