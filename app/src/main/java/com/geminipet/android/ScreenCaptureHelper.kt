@@ -22,6 +22,18 @@ class ScreenCaptureHelper(
     private val projection: MediaProjection
 ) {
     private val handler = Handler(Looper.getMainLooper())
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            // 系统停止投屏授权时由系统自动回收
+        }
+    }
+
+    init {
+        try {
+            projection.registerCallback(projectionCallback, handler)
+        } catch (_: Exception) {
+        }
+    }
 
     suspend fun captureJpegDataUrl(quality: Int = 48): String? = suspendCancellableCoroutine { cont ->
         val dm = context.resources.displayMetrics
@@ -51,8 +63,9 @@ class ScreenCaptureHelper(
         handler.postDelayed(timeoutRunnable, 2200)
 
         try {
-            reader = ImageReader.newInstance(targetWidth, targetHeight, PixelFormat.RGBA_8888, 2)
-            reader.setOnImageAvailableListener({ r ->
+            val imgReader = ImageReader.newInstance(targetWidth, targetHeight, PixelFormat.RGBA_8888, 2)
+            reader = imgReader
+            imgReader.setOnImageAvailableListener({ r ->
                 if (finished) return@setOnImageAvailableListener
                 val image = try { r.acquireLatestImage() } catch (_: Exception) { null } ?: return@setOnImageAvailableListener
                 finished = true
@@ -93,7 +106,7 @@ class ScreenCaptureHelper(
                 targetHeight,
                 density,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                reader.surface,
+                imgReader.surface,
                 null,
                 handler
             )
@@ -112,6 +125,7 @@ class ScreenCaptureHelper(
     }
 
     fun release() {
+        try { projection.unregisterCallback(projectionCallback) } catch (_: Exception) {}
         try { projection.stop() } catch (_: Exception) {}
     }
 }

@@ -159,7 +159,7 @@ object PetConfig {
     }
 
     fun addRecentReply(ctx: Context, text: String) {
-        val list = listOf(text) + getRecentReplies().filter { it != text }
+        val list = listOf(text) + getRecentReplies(ctx).filter { it != text }
         val arr = JSONArray(list.take(6))
         prefs(ctx).edit().putString("recent_replies", arr.toString()).apply()
     }
