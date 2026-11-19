@@ -2,6 +2,7 @@ package com.geminipet.android
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -14,6 +15,8 @@ import android.provider.Settings
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -23,6 +26,7 @@ import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.SeekBar
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -112,7 +116,7 @@ class MainActivity : AppCompatActivity() {
         val scroll = ScrollView(this).apply { setBackgroundColor(Color.parseColor("#F8FAFC")) }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(24), dp(16), dp(40))
+            setPadding(dp(16), dp(24), dp(16), dp(44))
         }
         scroll.addView(root)
 
@@ -130,7 +134,7 @@ class MainActivity : AppCompatActivity() {
         }
         val logo = ImageView(this).apply { setImageResource(R.drawable.pet_idle) }
         val titleTxt = TextView(this).apply {
-            this.text = "🐾 Gemini 猫娘手机桌宠 v1.3\n丝滑灵动胶囊 · 纯语音窥屏 · 永久截屏"
+            this.text = "🐾 Gemini 猫娘手机桌宠 v1.4\n丝滑灵动胶囊 · 自定义人设 · 多模型预设"
             textSize = 14.5f
             setTextColor(Color.parseColor("#202A5C"))
             setPadding(dp(12), 0, 0, 0)
@@ -177,15 +181,9 @@ class MainActivity : AppCompatActivity() {
                 if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                     perms.add(Manifest.permission.RECORD_AUDIO)
                 }
-                if (perms.isNotEmpty()) {
-                    requestPermissions(perms.toTypedArray(), 100)
-                }
-                // 如果已开启无障碍服务（Android 11+），直接免弹窗永久截屏启动；否则请求 MediaProjection
+                if (perms.isNotEmpty()) requestPermissions(perms.toTypedArray(), 100)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && isHotkeyAccessibilityEnabled()) {
-                    val svc = Intent(this@MainActivity, PetOverlayService::class.java).apply {
-                        action = PetOverlayService.ACTION_START
-                    }
-                    startForegroundService(svc)
+                    startForegroundService(Intent(this@MainActivity, PetOverlayService::class.java).setAction(PetOverlayService.ACTION_START))
                     Toast.makeText(this@MainActivity, "已使用无障碍永久截屏模式启动 ✅", Toast.LENGTH_SHORT).show()
                 } else {
                     val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -202,8 +200,8 @@ class MainActivity : AppCompatActivity() {
         root.addView(btnRow1)
         root.addView(btnRow2)
 
-        // 2. 显示形态、小人大小、灵动胶囊位置调节
-        root.addView(sectionTitle("2. 显示形态、窥屏模式与大小/位置调节"))
+        // 2. 显示形态、大小、胶囊长宽、收起时长调节
+        root.addView(sectionTitle("2. 灵动胶囊尺寸、窥屏模式与收起时间"))
         val modeGroup = buildRadioGroup(
             items = OverlayMode.entries,
             selected = PetConfig.getOverlayMode(this),
@@ -216,14 +214,45 @@ class MainActivity : AppCompatActivity() {
         root.addView(modeGroup)
 
         val cbStealth = CheckBox(this).apply {
-            this.text = "🎧 纯语音窥屏模式（不弹大卡片，仅顶部胶囊轻跳+后台播报语音）"
+            this.text = "🎧 纯语音窥屏模式（不弹大卡片，仅顶部黑条轻跳+后台语音）"
             isChecked = PetConfig.isStealthAudioOnly(this@MainActivity)
-            setOnCheckedChangeListener { _, checked ->
-                PetConfig.setStealthAudioOnly(this@MainActivity, checked)
-            }
+            setOnCheckedChangeListener { _, checked -> PetConfig.setStealthAudioOnly(this@MainActivity, checked) }
         }
         root.addView(cbStealth)
 
+        val capWLabel = TextView(this).apply { this.text = "黑色灵动胶囊左右长度：${PetConfig.getCapsuleWidthDp(this@MainActivity)} dp" }
+        val capWSeek = SeekBar(this).apply {
+            max = 140 // 100..240
+            progress = (PetConfig.getCapsuleWidthDp(this@MainActivity) - 100).coerceIn(0, 140)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                    val v = 100 + p
+                    PetConfig.setCapsuleWidthDp(this@MainActivity, v)
+                    capWLabel.text = "黑色灵动胶囊左右长度：$v dp"
+                    if (fromUser) {
+                        startService(Intent(this@MainActivity, PetOverlayService::class.java).setAction(PetOverlayService.ACTION_REFRESH_UI))
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        val offsetLabel = TextView(this).apply { this.text = "顶部灵动胶囊上下微调：${PetConfig.getCapsuleTopOffsetDp(this@MainActivity)} dp" }
+        val offsetSeek = SeekBar(this).apply {
+            max = 40
+            progress = PetConfig.getCapsuleTopOffsetDp(this@MainActivity)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                    PetConfig.setCapsuleTopOffsetDp(this@MainActivity, p)
+                    offsetLabel.text = "顶部灵动胶囊上下微调：$p dp"
+                    if (fromUser) {
+                        startService(Intent(this@MainActivity, PetOverlayService::class.java).setAction(PetOverlayService.ACTION_REFRESH_UI))
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
         val sizeLabel = TextView(this).apply { this.text = "悬浮小人大小：${PetConfig.getPetSizeDp(this@MainActivity)} dp" }
         val sizeSeek = SeekBar(this).apply {
             max = 112
@@ -241,17 +270,35 @@ class MainActivity : AppCompatActivity() {
                 override fun onStopTrackingTouch(sb: SeekBar?) {}
             })
         }
-        val offsetLabel = TextView(this).apply { this.text = "顶部灵动胶囊垂直微调：${PetConfig.getCapsuleTopOffsetDp(this@MainActivity)} dp（对齐挖孔用）" }
-        val offsetSeek = SeekBar(this).apply {
-            max = 40
-            progress = PetConfig.getCapsuleTopOffsetDp(this@MainActivity)
+
+        // 对话框收起时间设置（有语音播完后默认 1.0s / 无语音生成后默认 3.0s）
+        val ttsDelayLabel = TextView(this).apply {
+            this.text = "开启语音时，播完后收回延迟：${"%.1f".format(PetConfig.getCollapseAfterTtsMs(this@MainActivity) / 1000.0)} 秒"
+        }
+        val ttsDelaySeek = SeekBar(this).apply {
+            max = 15 // 0.5s .. 8.0s (step 0.5s)
+            progress = ((PetConfig.getCollapseAfterTtsMs(this@MainActivity) - 500L) / 500L).toInt().coerceIn(0, 15)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                    PetConfig.setCapsuleTopOffsetDp(this@MainActivity, p)
-                    offsetLabel.text = "顶部灵动胶囊垂直微调：$p dp（对齐挖孔用）"
-                    if (fromUser) {
-                        startService(Intent(this@MainActivity, PetOverlayService::class.java).setAction(PetOverlayService.ACTION_REFRESH_UI))
-                    }
+                    val ms = 500L + p * 500L
+                    PetConfig.setCollapseAfterTtsMs(this@MainActivity, ms)
+                    ttsDelayLabel.text = "开启语音时，播完后收回延迟：${"%.1f".format(ms / 1000.0)} 秒"
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        val noTtsDelayLabel = TextView(this).apply {
+            this.text = "关闭语音时，对话停留时间：${"%.1f".format(PetConfig.getCollapseNoTtsMs(this@MainActivity) / 1000.0)} 秒"
+        }
+        val noTtsDelaySeek = SeekBar(this).apply {
+            max = 28 // 1.0s .. 15.0s (step 0.5s)
+            progress = ((PetConfig.getCollapseNoTtsMs(this@MainActivity) - 1000L) / 500L).toInt().coerceIn(0, 28)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                    val ms = 1000L + p * 500L
+                    PetConfig.setCollapseNoTtsMs(this@MainActivity, ms)
+                    noTtsDelayLabel.text = "关闭语音时，对话停留时间：${"%.1f".format(ms / 1000.0)} 秒"
                 }
                 override fun onStartTrackingTouch(sb: SeekBar?) {}
                 override fun onStopTrackingTouch(sb: SeekBar?) {}
@@ -278,10 +325,16 @@ class MainActivity : AppCompatActivity() {
             isChecked = PetConfig.isVisionEnabled(this@MainActivity)
             setOnCheckedChangeListener { _, checked -> PetConfig.setVisionEnabled(this@MainActivity, checked) }
         }
-        root.addView(sizeLabel)
-        root.addView(sizeSeek)
+        root.addView(capWLabel)
+        root.addView(capWSeek)
         root.addView(offsetLabel)
         root.addView(offsetSeek)
+        root.addView(sizeLabel)
+        root.addView(sizeSeek)
+        root.addView(ttsDelayLabel)
+        root.addView(ttsDelaySeek)
+        root.addView(noTtsDelayLabel)
+        root.addView(noTtsDelaySeek)
         root.addView(alphaLabel)
         root.addView(alphaSeek)
         root.addView(cbVision)
@@ -315,9 +368,7 @@ class MainActivity : AppCompatActivity() {
 
         val btnAcc = Button(this).apply {
             this.text = "⌨️ 去开启无障碍服务（快捷键 + 永不掉线截屏）"
-            setOnClickListener {
-                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            }
+            setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         }
         val tvHotkeyStatus = TextView(this).apply {
             textSize = 12f
@@ -328,8 +379,190 @@ class MainActivity : AppCompatActivity() {
         root.addView(btnAcc)
         root.addView(tvHotkeyStatus)
 
-        // 4. 多引擎语音播报
-        root.addView(sectionTitle("4. 语音播报（多引擎 TTS）"))
+        // 4. 性格 × 行为人设（2行 × 2列：左下拉+新增自定义，右自动弹出并可编辑设定内容）
+        root.addView(sectionTitle("4. 性格 × 行为人设（支持下拉新增自定义）"))
+
+        var currentTraits = PetConfig.getAllTraits(this)
+        var currentBehaviors = PetConfig.getAllBehaviors(this)
+
+        val etTraitDesc = EditText(this).apply {
+            hint = "性格设定内容"
+            textSize = 12.5f
+            minLines = 2
+            maxLines = 4
+        }
+        val etBehaviorDesc = EditText(this).apply {
+            hint = "行为设定内容"
+            textSize = 12.5f
+            minLines = 2
+            maxLines = 4
+        }
+
+        val spTrait = Spinner(this)
+        val spBehavior = Spinner(this)
+        var ignoreTraitSelect = false
+        var ignoreBehaviorSelect = false
+
+        fun bindTraitSpinner(selectId: String) {
+            currentTraits = PetConfig.getAllTraits(this)
+            val labels = currentTraits.map { if (it.isCustom) "★ ${it.name}" else it.name } + "＋ 新增性格"
+            ignoreTraitSelect = true
+            spTrait.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
+            val idx = currentTraits.indexOfFirst { it.id == selectId }.coerceAtLeast(0)
+            spTrait.setSelection(idx, false)
+            etTraitDesc.setText(currentTraits[idx].desc)
+            ignoreTraitSelect = false
+        }
+
+        fun bindBehaviorSpinner(selectId: String) {
+            currentBehaviors = PetConfig.getAllBehaviors(this)
+            val labels = currentBehaviors.map { if (it.isCustom) "★ ${it.name}" else it.name } + "＋ 新增行为"
+            ignoreBehaviorSelect = true
+            spBehavior.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
+            val idx = currentBehaviors.indexOfFirst { it.id == selectId }.coerceAtLeast(0)
+            spBehavior.setSelection(idx, false)
+            etBehaviorDesc.setText(currentBehaviors[idx].desc)
+            ignoreBehaviorSelect = false
+        }
+
+        fun showAddPersonaDialog(isTrait: Boolean) {
+            val box = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(20), dp(12), dp(20), dp(4))
+            }
+            val etName = EditText(this).apply { hint = if (isTrait) "自定义性格名称（如：元气病娇）" else "自定义行为名称（如：毒舌监督学习）" }
+            val etDesc = EditText(this).apply {
+                hint = "填写详细人设/口吻设定（保存后也可在右侧随时修改）"
+                minLines = 3
+            }
+            box.addView(etName)
+            box.addView(etDesc)
+            AlertDialog.Builder(this)
+                .setTitle(if (isTrait) "新增自定义性格" else "新增自定义行为")
+                .setView(box)
+                .setPositiveButton("保存") { _, _ ->
+                    val name = etName.text.toString().trim()
+                    val desc = etDesc.text.toString().trim()
+                    if (name.isEmpty()) {
+                        Toast.makeText(this, "名称不能为空", Toast.LENGTH_SHORT).show()
+                        if (isTrait) bindTraitSpinner(PetConfig.getActiveTraitId(this)) else bindBehaviorSpinner(PetConfig.getActiveBehaviorId(this))
+                        return@setPositiveButton
+                    }
+                    if (isTrait) {
+                        val item = PetConfig.addCustomTrait(this, name, desc.ifEmpty { "按「$name」性格自然发挥。" })
+                        bindTraitSpinner(item.id)
+                    } else {
+                        val item = PetConfig.addCustomBehavior(this, name, desc.ifEmpty { "按「$name」行为模式自然互动。" })
+                        bindBehaviorSpinner(item.id)
+                    }
+                    Toast.makeText(this, "已新增「$name」✅", Toast.LENGTH_SHORT).show()
+                }
+                .setNegativeButton("取消") { _, _ ->
+                    if (isTrait) bindTraitSpinner(PetConfig.getActiveTraitId(this)) else bindBehaviorSpinner(PetConfig.getActiveBehaviorId(this))
+                }
+                .setOnCancelListener {
+                    if (isTrait) bindTraitSpinner(PetConfig.getActiveTraitId(this)) else bindBehaviorSpinner(PetConfig.getActiveBehaviorId(this))
+                }
+                .show()
+        }
+
+        spTrait.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                if (ignoreTraitSelect) return
+                if (pos == currentTraits.size) {
+                    showAddPersonaDialog(isTrait = true)
+                } else {
+                    val chosen = currentTraits[pos]
+                    PetConfig.setActiveTraitId(this@MainActivity, chosen.id)
+                    etTraitDesc.setText(chosen.desc)
+                }
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        spBehavior.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                if (ignoreBehaviorSelect) return
+                if (pos == currentBehaviors.size) {
+                    showAddPersonaDialog(isTrait = false)
+                } else {
+                    val chosen = currentBehaviors[pos]
+                    PetConfig.setActiveBehaviorId(this@MainActivity, chosen.id)
+                    etBehaviorDesc.setText(chosen.desc)
+                }
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        bindTraitSpinner(PetConfig.getActiveTraitId(this))
+        bindBehaviorSpinner(PetConfig.getActiveBehaviorId(this))
+
+        // 第一行：左性格下拉，右性格设定
+        val rowTrait = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.TOP
+            setPadding(0, dp(4), 0, dp(4))
+        }
+        val colTraitLeft = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        colTraitLeft.addView(TextView(this).apply { this.text = "性格"; textSize = 12f; setTextColor(Color.parseColor("#475569")) })
+        colTraitLeft.addView(spTrait)
+        rowTrait.addView(colTraitLeft, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f))
+        rowTrait.addView(etTraitDesc, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.65f))
+        root.addView(rowTrait)
+
+        // 第二行：左行为下拉，右行为设定
+        val rowBehavior = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.TOP
+            setPadding(0, dp(4), 0, dp(4))
+        }
+        val colBehaviorLeft = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        colBehaviorLeft.addView(TextView(this).apply { this.text = "行为"; textSize = 12f; setTextColor(Color.parseColor("#475569")) })
+        colBehaviorLeft.addView(spBehavior)
+        rowBehavior.addView(colBehaviorLeft, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f))
+        rowBehavior.addView(etBehaviorDesc, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.65f))
+        root.addView(rowBehavior)
+
+        val personaBtnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        personaBtnRow.addView(Button(this).apply {
+            this.text = "💾 保存右侧设定"
+            textSize = 12f
+            setOnClickListener {
+                val tId = PetConfig.getActiveTraitId(this@MainActivity)
+                val bId = PetConfig.getActiveBehaviorId(this@MainActivity)
+                PetConfig.saveTraitDesc(this@MainActivity, tId, etTraitDesc.text.toString())
+                PetConfig.saveBehaviorDesc(this@MainActivity, bId, etBehaviorDesc.text.toString())
+                bindTraitSpinner(tId)
+                bindBehaviorSpinner(bId)
+                Toast.makeText(this@MainActivity, "性格与行为设定已保存 ✅", Toast.LENGTH_SHORT).show()
+            }
+        })
+        personaBtnRow.addView(Button(this).apply {
+            this.text = "🗑️ 删自定义项"
+            textSize = 12f
+            setOnClickListener {
+                val tDel = PetConfig.deleteCustomTrait(this@MainActivity, PetConfig.getActiveTraitId(this@MainActivity))
+                val bDel = PetConfig.deleteCustomBehavior(this@MainActivity, PetConfig.getActiveBehaviorId(this@MainActivity))
+                if (tDel || bDel) {
+                    bindTraitSpinner(PetConfig.getActiveTraitId(this@MainActivity))
+                    bindBehaviorSpinner(PetConfig.getActiveBehaviorId(this@MainActivity))
+                    Toast.makeText(this@MainActivity, "已删除选中的自定义人设", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this@MainActivity, "内置人设不可删除，仅支持删除 ★ 自定义项", Toast.LENGTH_SHORT).show()
+                }
+            }
+        })
+        root.addView(personaBtnRow)
+
+        val cbRandomMood = CheckBox(this).apply {
+            this.text = "🎲 开启随机心情（每 30 分钟自动换性格×行为）"
+            isChecked = PetConfig.isRandomMood(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> PetConfig.setRandomMood(this@MainActivity, checked) }
+        }
+        root.addView(cbRandomMood)
+
+        // 5. 多引擎语音播报
+        root.addView(sectionTitle("5. 语音播报（多引擎 TTS）"))
         val cbTts = CheckBox(this).apply {
             this.text = "🔊 开启语音播报"
             isChecked = PetConfig.isTtsEnabled(this@MainActivity)
@@ -338,7 +571,6 @@ class MainActivity : AppCompatActivity() {
         root.addView(cbTts)
 
         val curEngine = PetConfig.getTtsEngine(this)
-
         val geminiTtsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val etGeminiTtsModel = EditText(this).apply {
             hint = "Gemini TTS 模型（默认 gemini-2.5-flash-preview-tts）"
@@ -352,11 +584,6 @@ class MainActivity : AppCompatActivity() {
             orientation = RadioGroup.VERTICAL,
             labelOf = { it.second }
         ) { PetConfig.setGeminiTtsVoice(this@MainActivity, it.first) }
-        geminiTtsBox.addView(TextView(this).apply {
-            this.text = "复用下方 Gemini API Key，零额外配置即可发声："
-            textSize = 12f
-            setTextColor(Color.parseColor("#475569"))
-        })
         geminiTtsBox.addView(etGeminiTtsModel)
         geminiTtsBox.addView(geminiVoiceGroup)
 
@@ -469,8 +696,8 @@ class MainActivity : AppCompatActivity() {
         root.addView(ttsBtnRow)
         root.addView(ttsTestStatus)
 
-        // 5. 好感度与投喂
-        root.addView(sectionTitle("5. 双向好感度 (-100 ~ +100) & 投喂"))
+        // 6. 好感度与投喂
+        root.addView(sectionTitle("6. 双向好感度 (-100 ~ +100) & 投喂"))
         val affLabel = TextView(this)
         fun refreshAffLabel() {
             val a = PetConfig.getAffection(this)
@@ -523,40 +750,14 @@ class MainActivity : AppCompatActivity() {
         root.addView(affSeek)
         root.addView(feedRow)
 
-        // 6. 性格 × 行为选择
-        root.addView(sectionTitle("6. 性格 × 行为人设组合"))
-        val curTrait = PetConfig.TRAITS.firstOrNull { it.id == PetConfig.getActiveTraitId(this) } ?: PetConfig.TRAITS.first()
-        val curBehavior = PetConfig.BEHAVIORS.firstOrNull { it.id == PetConfig.getActiveBehaviorId(this) } ?: PetConfig.BEHAVIORS.first()
-        root.addView(buildRadioGroup(
-            items = PetConfig.TRAITS,
-            selected = curTrait,
-            orientation = RadioGroup.HORIZONTAL,
-            labelOf = { it.name },
-            textSizeSp = 12f
-        ) { PetConfig.setActiveTraitId(this@MainActivity, it.id) })
-        root.addView(buildRadioGroup(
-            items = PetConfig.BEHAVIORS,
-            selected = curBehavior,
-            orientation = RadioGroup.HORIZONTAL,
-            labelOf = { it.name },
-            textSizeSp = 12f
-        ) { PetConfig.setActiveBehaviorId(this@MainActivity, it.id) })
-
-        val cbRandomMood = CheckBox(this).apply {
-            this.text = "🎲 开启随机心情（每 30 分钟自动换性格×行为）"
-            isChecked = PetConfig.isRandomMood(this@MainActivity)
-            setOnCheckedChangeListener { _, checked -> PetConfig.setRandomMood(this@MainActivity, checked) }
-        }
-        root.addView(cbRandomMood)
-
-        // 7. 大模型 API 配置
-        root.addView(sectionTitle("7. 大模型 API 配置"))
+        // 7. 大模型 API 配置（内置 Google / DeepSeek / OpenAI / 自定义预设）
+        root.addView(sectionTitle("7. 大模型 API 配置（多平台预设）"))
         val etUrl = EditText(this).apply {
             hint = "OpenAI 兼容接口地址"
             setText(PetConfig.getApiUrl(this@MainActivity))
         }
         val etModel = EditText(this).apply {
-            hint = "模型名（推荐 gemini-3.5-flash-lite）"
+            hint = "模型名（如 gemini-3.5-flash-lite / deepseek-chat / gpt-4o-mini）"
             setText(PetConfig.getModel(this@MainActivity))
         }
         val etKeys = EditText(this).apply {
@@ -564,6 +765,35 @@ class MainActivity : AppCompatActivity() {
             minLines = 2
             setText(PetConfig.getApiKeysRaw(this@MainActivity))
         }
+
+        val spPreset = Spinner(this)
+        var ignorePresetSelect = true
+        spPreset.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            PetConfig.API_PRESETS.map { it.label }
+        )
+        val curPresetIdx = PetConfig.API_PRESETS.indexOfFirst { it.id == PetConfig.getApiPresetId(this) }.coerceAtLeast(0)
+        spPreset.setSelection(curPresetIdx, false)
+        spPreset.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                if (ignorePresetSelect) {
+                    ignorePresetSelect = false
+                    return
+                }
+                val preset = PetConfig.API_PRESETS[pos]
+                PetConfig.setApiPresetId(this@MainActivity, preset.id)
+                if (preset.url.isNotEmpty()) {
+                    etUrl.setText(preset.url)
+                    etModel.setText(preset.defaultModel)
+                    PetConfig.setApiUrl(this@MainActivity, preset.url)
+                    PetConfig.setModel(this@MainActivity, preset.defaultModel)
+                    Toast.makeText(this@MainActivity, "已切换为 ${preset.label}", Toast.LENGTH_SHORT).show()
+                }
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
         val testStatus = TextView(this).apply { textSize = 12f; setPadding(0, dp(4), 0, dp(4)) }
         val apiBtnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         apiBtnRow.addView(Button(this).apply {
@@ -588,6 +818,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
+        root.addView(spPreset)
         root.addView(etUrl)
         root.addView(etModel)
         root.addView(etKeys)

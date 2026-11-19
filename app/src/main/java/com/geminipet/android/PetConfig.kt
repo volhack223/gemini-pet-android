@@ -2,6 +2,7 @@ package com.geminipet.android
 
 import android.content.Context
 import org.json.JSONArray
+import org.json.JSONObject
 
 enum class OverlayMode(val code: String, val label: String) {
     CAPSULE("capsule", "状态栏灵动胶囊"),
@@ -37,11 +38,19 @@ enum class HotkeyBinding(val code: String, val label: String) {
     }
 }
 
+data class ApiPreset(
+    val id: String,
+    val label: String,
+    val url: String,
+    val defaultModel: String
+)
+
 data class PersonaItem(
     val id: String,
     val name: String,
     val desc: String,
-    val catchphrases: String = ""
+    val catchphrases: String = "",
+    val isCustom: Boolean = false
 )
 
 data class AffectionStage(
@@ -53,6 +62,13 @@ data class AffectionStage(
 
 object PetConfig {
     private const val PREF_NAME = "gemini_pet_android_prefs"
+
+    val API_PRESETS = listOf(
+        ApiPreset("google", "Google Gemini (AI Studio)", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "gemini-3.5-flash-lite"),
+        ApiPreset("deepseek", "DeepSeek (深度求索)", "https://api.deepseek.com/chat/completions", "deepseek-chat"),
+        ApiPreset("openai", "OpenAI (GPT)", "https://api.openai.com/v1/chat/completions", "gpt-4o-mini"),
+        ApiPreset("custom", "自定义第三方 / 本地 API", "", "")
+    )
 
     val GEMINI_TTS_VOICES = listOf(
         "Leda" to "Leda (元气少女)",
@@ -117,6 +133,124 @@ object PetConfig {
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
 
+    // --- 自定义性格与行为管理 ---
+    private fun loadCustomItems(ctx: Context, key: String): MutableList<PersonaItem> {
+        val raw = prefs(ctx).getString(key, "[]") ?: "[]"
+        val out = mutableListOf<PersonaItem>()
+        try {
+            val arr = JSONArray(raw)
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val id = o.optString("id")
+                val name = o.optString("name")
+                val desc = o.optString("desc")
+                val catch = o.optString("catchphrases")
+                if (id.isNotEmpty() && name.isNotEmpty()) {
+                    out.add(PersonaItem(id, name, desc, catch, isCustom = true))
+                }
+            }
+        } catch (_: Exception) {}
+        return out
+    }
+
+    private fun saveCustomItems(ctx: Context, key: String, list: List<PersonaItem>) {
+        val arr = JSONArray()
+        list.forEach { item ->
+            arr.put(JSONObject().apply {
+                put("id", item.id)
+                put("name", item.name)
+                put("desc", item.desc)
+                put("catchphrases", item.catchphrases)
+            })
+        }
+        prefs(ctx).edit().putString(key, arr.toString()).apply()
+    }
+
+    private fun getDescOverride(ctx: Context, prefix: String, id: String): String? =
+        prefs(ctx).getString("${prefix}_desc_$id", null)
+
+    fun saveTraitDesc(ctx: Context, id: String, newDesc: String) {
+        val customs = loadCustomItems(ctx, "custom_traits_json")
+        val idx = customs.indexOfFirst { it.id == id }
+        if (idx >= 0) {
+            customs[idx] = customs[idx].copy(desc = newDesc.trim())
+            saveCustomItems(ctx, "custom_traits_json", customs)
+        } else {
+            prefs(ctx).edit().putString("trait_desc_$id", newDesc.trim()).apply()
+        }
+        prefs(ctx).edit().remove("recent_replies").apply()
+    }
+
+    fun saveBehaviorDesc(ctx: Context, id: String, newDesc: String) {
+        val customs = loadCustomItems(ctx, "custom_behaviors_json")
+        val idx = customs.indexOfFirst { it.id == id }
+        if (idx >= 0) {
+            customs[idx] = customs[idx].copy(desc = newDesc.trim())
+            saveCustomItems(ctx, "custom_behaviors_json", customs)
+        } else {
+            prefs(ctx).edit().putString("behavior_desc_$id", newDesc.trim()).apply()
+        }
+        prefs(ctx).edit().remove("recent_replies").apply()
+    }
+
+    fun addCustomTrait(ctx: Context, name: String, desc: String): PersonaItem {
+        val customs = loadCustomItems(ctx, "custom_traits_json")
+        val item = PersonaItem("custom_t_${System.currentTimeMillis()}", name.trim(), desc.trim(), "", isCustom = true)
+        customs.add(item)
+        saveCustomItems(ctx, "custom_traits_json", customs)
+        setActiveTraitId(ctx, item.id)
+        return item
+    }
+
+    fun addCustomBehavior(ctx: Context, name: String, desc: String): PersonaItem {
+        val customs = loadCustomItems(ctx, "custom_behaviors_json")
+        val item = PersonaItem("custom_b_${System.currentTimeMillis()}", name.trim(), desc.trim(), "", isCustom = true)
+        customs.add(item)
+        saveCustomItems(ctx, "custom_behaviors_json", customs)
+        setActiveBehaviorId(ctx, item.id)
+        return item
+    }
+
+    fun deleteCustomTrait(ctx: Context, id: String): Boolean {
+        val customs = loadCustomItems(ctx, "custom_traits_json")
+        val removed = customs.removeAll { it.id == id }
+        if (removed) {
+            saveCustomItems(ctx, "custom_traits_json", customs)
+            if (getActiveTraitId(ctx) == id) setActiveTraitId(ctx, "cute")
+        }
+        return removed
+    }
+
+    fun deleteCustomBehavior(ctx: Context, id: String): Boolean {
+        val customs = loadCustomItems(ctx, "custom_behaviors_json")
+        val removed = customs.removeAll { it.id == id }
+        if (removed) {
+            saveCustomItems(ctx, "custom_behaviors_json", customs)
+            if (getActiveBehaviorId(ctx) == id) setActiveBehaviorId(ctx, "curious")
+        }
+        return removed
+    }
+
+    fun getAllTraits(ctx: Context): List<PersonaItem> {
+        val builtins = TRAITS.map { t ->
+            val ov = getDescOverride(ctx, "trait", t.id)
+            if (ov != null) t.copy(desc = ov) else t
+        }
+        return builtins + loadCustomItems(ctx, "custom_traits_json")
+    }
+
+    fun getAllBehaviors(ctx: Context): List<PersonaItem> {
+        val builtins = BEHAVIORS.map { b ->
+            val ov = getDescOverride(ctx, "behavior", b.id)
+            if (ov != null) b.copy(desc = ov) else b
+        }
+        return builtins + loadCustomItems(ctx, "custom_behaviors_json")
+    }
+
+    // --- API 配置与预设 ---
+    fun getApiPresetId(ctx: Context): String = prefs(ctx).getString("api_preset_id", "google") ?: "google"
+    fun setApiPresetId(ctx: Context, id: String) = prefs(ctx).edit().putString("api_preset_id", id).apply()
+
     fun getApiUrl(ctx: Context): String =
         prefs(ctx).getString("api_url", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")!!
 
@@ -139,11 +273,21 @@ object PetConfig {
     fun getPetSizeDp(ctx: Context): Int = prefs(ctx).getInt("pet_size_dp", 82).coerceIn(48, 160)
     fun setPetSizeDp(ctx: Context, sizeDp: Int) = prefs(ctx).edit().putInt("pet_size_dp", sizeDp.coerceIn(48, 160)).apply()
 
-    // 顶部灵动胶囊 Y 偏移 (0dp ~ 40dp)
+    // 顶部灵动胶囊 Y 偏移 (0dp ~ 40dp) & 左右宽度 (100dp ~ 240dp)
     fun getCapsuleTopOffsetDp(ctx: Context): Int = prefs(ctx).getInt("capsule_top_dp", 8).coerceIn(0, 40)
     fun setCapsuleTopOffsetDp(ctx: Context, offsetDp: Int) = prefs(ctx).edit().putInt("capsule_top_dp", offsetDp.coerceIn(0, 40)).apply()
 
-    // 双自定义快捷键：截屏吐槽（默认双击音量-） & 语音对话（默认双击音量+）
+    fun getCapsuleWidthDp(ctx: Context): Int = prefs(ctx).getInt("capsule_width_dp", 146).coerceIn(100, 240)
+    fun setCapsuleWidthDp(ctx: Context, widthDp: Int) = prefs(ctx).edit().putInt("capsule_width_dp", widthDp.coerceIn(100, 240)).apply()
+
+    // 对话框自动收起延迟：开启语音时（播报结束后默认 1.0s）；关闭语音时（生成后默认 3.0s）
+    fun getCollapseAfterTtsMs(ctx: Context): Long = prefs(ctx).getLong("collapse_after_tts_ms", 1000L).coerceIn(500L, 8000L)
+    fun setCollapseAfterTtsMs(ctx: Context, ms: Long) = prefs(ctx).edit().putLong("collapse_after_tts_ms", ms.coerceIn(500L, 8000L)).apply()
+
+    fun getCollapseNoTtsMs(ctx: Context): Long = prefs(ctx).getLong("collapse_no_tts_ms", 3000L).coerceIn(1000L, 15000L)
+    fun setCollapseNoTtsMs(ctx: Context, ms: Long) = prefs(ctx).edit().putLong("collapse_no_tts_ms", ms.coerceIn(1000L, 15000L)).apply()
+
+    // 双自定义快捷键
     fun getCaptureHotkey(ctx: Context): HotkeyBinding =
         HotkeyBinding.fromCode(prefs(ctx).getString("hotkey_capture", "double_vol_down"), HotkeyBinding.DOUBLE_VOL_DOWN)
 
@@ -249,8 +393,8 @@ object PetConfig {
         val now = System.currentTimeMillis()
         val last = prefs(ctx).getLong("last_mood_at", 0L)
         if (now - last < 30 * 60 * 1000L) return null
-        val t = TRAITS.random()
-        val b = BEHAVIORS.random()
+        val t = getAllTraits(ctx).random()
+        val b = getAllBehaviors(ctx).random()
         prefs(ctx).edit()
             .putString("trait_id", t.id)
             .putString("behavior_id", b.id)
@@ -261,8 +405,10 @@ object PetConfig {
     }
 
     fun buildPersonaPrompt(ctx: Context): String {
-        val trait = TRAITS.firstOrNull { it.id == getActiveTraitId(ctx) } ?: TRAITS.first()
-        val behavior = BEHAVIORS.firstOrNull { it.id == getActiveBehaviorId(ctx) } ?: BEHAVIORS.first()
+        val allTraits = getAllTraits(ctx)
+        val allBehaviors = getAllBehaviors(ctx)
+        val trait = allTraits.firstOrNull { it.id == getActiveTraitId(ctx) } ?: allTraits.first()
+        val behavior = allBehaviors.firstOrNull { it.id == getActiveBehaviorId(ctx) } ?: allBehaviors.first()
         val aff = getAffection(ctx)
         val stage = affectionStage(aff)
         val note = getCustomNote(ctx)
