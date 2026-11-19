@@ -4,13 +4,35 @@ import android.content.Context
 import org.json.JSONArray
 
 enum class OverlayMode(val code: String, val label: String) {
-    CAPSULE("capsule", "顶部灵动胶囊"),
-    FLOATING("floating", "半透明悬浮小人"),
-    HIDDEN("hidden", "贴边隐身把手");
+    CAPSULE("capsule", "状态栏灵动胶囊"),
+    FLOATING("floating", "悬浮小人"),
+    HIDDEN("hidden", "贴边隐身");
 
     companion object {
         fun fromCode(code: String?): OverlayMode =
             entries.firstOrNull { it.code == code } ?: CAPSULE
+    }
+}
+
+enum class TtsEngine(val code: String, val label: String) {
+    GEMINI("gemini", "Gemini AI 语音"),
+    OPENAI_COMPAT("openai_compat", "自定义在线 TTS"),
+    SYSTEM("system", "系统原生 TTS");
+
+    companion object {
+        fun fromCode(code: String?): TtsEngine =
+            entries.firstOrNull { it.code == code } ?: GEMINI
+    }
+}
+
+enum class HotkeyMode(val code: String, val label: String) {
+    BOTH_VOL("both_vol", "同时按 音量+ & 音量-"),
+    DOUBLE_VOL_DOWN("double_vol_down", "双击 音量-"),
+    OFF("off", "关闭");
+
+    companion object {
+        fun fromCode(code: String?): HotkeyMode =
+            entries.firstOrNull { it.code == code } ?: BOTH_VOL
     }
 }
 
@@ -30,6 +52,14 @@ data class AffectionStage(
 
 object PetConfig {
     private const val PREF_NAME = "gemini_pet_android_prefs"
+
+    val GEMINI_TTS_VOICES = listOf(
+        "Leda" to "Leda (元气少女)",
+        "Aoede" to "Aoede (甜美轻快)",
+        "Kore" to "Kore (清冷御姐)",
+        "Zephyr" to "Zephyr (活泼开朗)",
+        "Puck" to "Puck (古灵精怪)"
+    )
 
     val TRAITS = listOf(
         PersonaItem("cute", "可爱", "软萌元气、活泼粘人，说话轻快生动。", "喵呜、嘿嘿、贴贴"),
@@ -96,7 +126,7 @@ object PetConfig {
     fun setApiKeysRaw(ctx: Context, keys: String) = prefs(ctx).edit().putString("api_keys", keys.trim()).apply()
 
     fun getApiKeyList(ctx: Context): List<String> =
-        getApiKeysRaw(ctx).split(Regex("[\\r\\n,，;；]+")).map { it.trim() }.filter { it.isNotEmpty() }
+        getApiKeysRaw(ctx).split(Regex("[\r\n,，;；]+")).map { it.trim() }.filter { it.isNotEmpty() }
 
     fun getModel(ctx: Context): String = prefs(ctx).getString("model", "gemini-3.5-flash-lite")!!
     fun setModel(ctx: Context, model: String) = prefs(ctx).edit().putString("model", model.trim()).apply()
@@ -104,13 +134,50 @@ object PetConfig {
     fun getOverlayMode(ctx: Context): OverlayMode = OverlayMode.fromCode(prefs(ctx).getString("overlay_mode", "capsule"))
     fun setOverlayMode(ctx: Context, mode: OverlayMode) = prefs(ctx).edit().putString("overlay_mode", mode.code).apply()
 
+    // 悬浮小人大小 (48dp ~ 160dp)
+    fun getPetSizeDp(ctx: Context): Int = prefs(ctx).getInt("pet_size_dp", 82).coerceIn(48, 160)
+    fun setPetSizeDp(ctx: Context, sizeDp: Int) = prefs(ctx).edit().putInt("pet_size_dp", sizeDp.coerceIn(48, 160)).apply()
+
+    // 顶部灵动胶囊 Y 偏移 (0dp ~ 40dp，用于精准对齐摄像头挖孔)
+    fun getCapsuleTopOffsetDp(ctx: Context): Int = prefs(ctx).getInt("capsule_top_dp", 8).coerceIn(0, 40)
+    fun setCapsuleTopOffsetDp(ctx: Context, offsetDp: Int) = prefs(ctx).edit().putInt("capsule_top_dp", offsetDp.coerceIn(0, 40)).apply()
+
+    // 全局硬件快捷键模式
+    fun getHotkeyMode(ctx: Context): HotkeyMode = HotkeyMode.fromCode(prefs(ctx).getString("hotkey_mode", "both_vol"))
+    fun setHotkeyMode(ctx: Context, mode: HotkeyMode) = prefs(ctx).edit().putString("hotkey_mode", mode.code).apply()
+
+    // TTS 语音配置
     fun isTtsEnabled(ctx: Context): Boolean = prefs(ctx).getBoolean("tts_enabled", true)
     fun setTtsEnabled(ctx: Context, enabled: Boolean) = prefs(ctx).edit().putBoolean("tts_enabled", enabled).apply()
 
-    fun getTtsPitch(ctx: Context): Float = prefs(ctx).getFloat("tts_pitch", 1.22f).coerceIn(0.6f, 1.8f)
+    fun getTtsEngine(ctx: Context): TtsEngine = TtsEngine.fromCode(prefs(ctx).getString("tts_engine", "gemini"))
+    fun setTtsEngine(ctx: Context, engine: TtsEngine) = prefs(ctx).edit().putString("tts_engine", engine.code).apply()
+
+    fun getGeminiTtsModel(ctx: Context): String = prefs(ctx).getString("gemini_tts_model", "gemini-2.5-flash-preview-tts")!!
+    fun setGeminiTtsModel(ctx: Context, model: String) = prefs(ctx).edit().putString("gemini_tts_model", model.trim()).apply()
+
+    fun getGeminiTtsVoice(ctx: Context): String = prefs(ctx).getString("gemini_tts_voice", "Leda")!!
+    fun setGeminiTtsVoice(ctx: Context, voice: String) = prefs(ctx).edit().putString("gemini_tts_voice", voice.trim()).apply()
+
+    fun getCustomTtsUrl(ctx: Context): String = prefs(ctx).getString("custom_tts_url", "https://api.siliconflow.cn/v1/audio/speech")!!
+    fun setCustomTtsUrl(ctx: Context, url: String) = prefs(ctx).edit().putString("custom_tts_url", url.trim()).apply()
+
+    fun getCustomTtsKey(ctx: Context): String = prefs(ctx).getString("custom_tts_key", "") ?: ""
+    fun setCustomTtsKey(ctx: Context, key: String) = prefs(ctx).edit().putString("custom_tts_key", key.trim()).apply()
+
+    fun getCustomTtsModel(ctx: Context): String = prefs(ctx).getString("custom_tts_model", "FunAudioLLM/CosyVoice2-0.5B")!!
+    fun setCustomTtsModel(ctx: Context, model: String) = prefs(ctx).edit().putString("custom_tts_model", model.trim()).apply()
+
+    fun getCustomTtsVoice(ctx: Context): String = prefs(ctx).getString("custom_tts_voice", "FunAudioLLM/CosyVoice2-0.5B:anna")!!
+    fun setCustomTtsVoice(ctx: Context, voice: String) = prefs(ctx).edit().putString("custom_tts_voice", voice.trim()).apply()
+
+    fun getTtsPitch(ctx: Context): Float = prefs(ctx).getFloat("tts_pitch", 1.20f).coerceIn(0.6f, 1.8f)
     fun setTtsPitch(ctx: Context, pitch: Float) = prefs(ctx).edit().putFloat("tts_pitch", pitch.coerceIn(0.6f, 1.8f)).apply()
 
-    fun getBubbleAlpha(ctx: Context): Float = prefs(ctx).getFloat("bubble_alpha", 0.78f).coerceIn(0.35f, 1.0f)
+    fun getTtsRate(ctx: Context): Float = prefs(ctx).getFloat("tts_rate", 1.08f).coerceIn(0.6f, 1.8f)
+    fun setTtsRate(ctx: Context, rate: Float) = prefs(ctx).edit().putFloat("tts_rate", rate.coerceIn(0.6f, 1.8f)).apply()
+
+    fun getBubbleAlpha(ctx: Context): Float = prefs(ctx).getFloat("bubble_alpha", 0.88f).coerceIn(0.35f, 1.0f)
     fun setBubbleAlpha(ctx: Context, alpha: Float) = prefs(ctx).edit().putFloat("bubble_alpha", alpha.coerceIn(0.35f, 1.0f)).apply()
 
     fun isVisionEnabled(ctx: Context): Boolean = prefs(ctx).getBoolean("vision_enabled", true)
@@ -198,7 +265,9 @@ object PetConfig {
             appendLine("4. 好感度态度【${stage.label}】：${stage.hint}")
             appendLine("5. 情绪符号多样性：自然交替使用 ~、！！、……、(＞▽＜)、(￣^￣)、(╬▔皿▔)╯、(*/ω＼*)、(눈_눈) 等，严禁公式化重复同一结尾符号。")
             if (note.isNotEmpty()) appendLine("6. 补充设定：$note")
-            if (recent.isNotEmpty()) appendLine("7. 严禁复读最近刚说过的话：${recent.joinToString("、") { "「$it」" }}")
+            if (recent.isNotEmpty()) {
+                appendLine("7. 禁止与最近台词雷同：${recent.joinToString(" | ")}")
+            }
         }
     }
 }

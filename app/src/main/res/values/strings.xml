@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="hotkey_service_desc">用于监听全局音量组合键（同时按音量+与音量-，或双击音量-），一键唤醒猫娘桌宠截屏并生成吐槽对话。</string>
+</resources>
